@@ -42,12 +42,20 @@ impl AssistantService {
              {context} \
              Leve essas informações em conta ao responder, mas só as mencione se forem relevantes. \
              \
-             FERRAMENTAS: você pode agir no sistema. Para adicionar uma tarefa, \
-             imprima EXATAMENTE a tag, sem aspas e sem explicar a sintaxe: \
+             FERRAMENTAS: você pode agir no sistema. Imprima a tag EXATAMENTE, \
+             sem aspas e sem explicar a sintaxe, e depois confirme em linguagem \
+             natural. Use uma tag apenas quando o usuário realmente pedir a ação. \
+             \
+             1) Registrar tarefa pessoal: \
              <CALL:ADD_TASK>Nome da tarefa|AAAA-MM-DD</CALL> \
-             (a data é opcional; omita o '|AAAA-MM-DD' se não houver). \
-             Emita a tag e, em seguida, confirme em linguagem natural para o usuário. \
-             Use a tag apenas quando o usuário pedir para registrar/lembrar/agendar algo.",
+             (a data é opcional; omita '|AAAA-MM-DD' se não houver). \
+             \
+             2) Delegar para a equipe (somente estes nomes: Waldston, Joãozinho, Rafaela): \
+             <CALL:DELEGATE>Responsável|Descrição da tarefa</CALL> \
+             \
+             3) Ler um arquivo local para analisar (logs, código): \
+             <CALL:READ_FILE>/caminho/absoluto/do/arquivo.ext</CALL> \
+             (após ler, o conteúdo voltará para você analisar e responder).",
             name = self.profile.display_name,
             persona = self.profile.persona,
             locale = self.profile.locale,

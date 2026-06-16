@@ -135,77 +135,107 @@ async fn run_generation(
     history: &mut History,
     user_input: String,
 ) {
-    // Record the user turn, then build the ChatML prompt: system (live DB
-    // context + tools) + rolling history (which now ends with this user turn).
+    // Record the user turn.
     history.push_user(user_input);
-    let system = assistant.system_prompt().unwrap_or_default();
-    let prompt = conversation::to_chatml(&system, history);
 
-    emit(app, EVENT_STATE, StatePayload { state: CharacterState::Thinking });
+    // Accumulated visible text across all passes (a tool like READ_FILE can
+    // trigger a follow-up pass after injecting file content into history).
+    let mut transcript = String::new();
+    let mut pass: u8 = 0;
+    const MAX_FOLLOW_UP_PASSES: u8 = 1;
 
-    let (token_tx, mut token_rx) = mpsc::channel::<String>(64);
+    loop {
+        emit(app, EVENT_STATE, StatePayload { state: CharacterState::Thinking });
 
-    // Reader task: filters tool calls out of the stream, forwards visible text
-    // to the UI, executes detected tools, and accumulates the visible text.
-    let app_reader = app.clone();
-    let router_reader = router.clone();
-    let reader = tauri::async_runtime::spawn(async move {
-        let mut filter = StreamFilter::new();
-        let mut spoke = false;
+        let system = assistant.system_prompt().unwrap_or_default();
+        let prompt = conversation::to_chatml(&system, history);
 
-        while let Some(tok) = token_rx.recv().await {
-            let (text, calls) = filter.push(&tok);
+        let (token_tx, mut token_rx) = mpsc::channel::<String>(64);
 
-            if !text.is_empty() {
-                if !spoke {
-                    emit(
-                        &app_reader,
-                        EVENT_STATE,
-                        StatePayload { state: CharacterState::Speaking },
-                    );
-                    spoke = true;
-                }
-                emit(&app_reader, EVENT_TOKEN, TokenPayload { token: text });
-            }
+        // Reader task: filters tool calls out of the stream, forwards visible
+        // text to the UI, executes detected tools, and collects follow-up
+        // context any tool wants injected back into the conversation.
+        let app_reader = app.clone();
+        let router_reader = router.clone();
+        let reader = tauri::async_runtime::spawn(async move {
+            let mut filter = StreamFilter::new();
+            let mut spoke = false;
+            let mut follow_ups: Vec<String> = Vec::new();
 
-            for body in calls {
-                let call = ToolCall::parse(&body);
-                match router_reader.dispatch(call).await {
-                    Ok(summary) => {
-                        emit(&app_reader, EVENT_TOOL, ToolPayload { summary });
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "tool execution failed");
+            while let Some(tok) = token_rx.recv().await {
+                let (text, calls) = filter.push(&tok);
+
+                if !text.is_empty() {
+                    if !spoke {
                         emit(
                             &app_reader,
-                            EVENT_TOOL,
-                            ToolPayload { summary: format!("Falha ao executar comando: {e}") },
+                            EVENT_STATE,
+                            StatePayload { state: CharacterState::Speaking },
                         );
+                        spoke = true;
+                    }
+                    emit(&app_reader, EVENT_TOKEN, TokenPayload { token: text });
+                }
+
+                for body in calls {
+                    let call = ToolCall::parse(&body);
+                    match router_reader.dispatch(call).await {
+                        Ok(outcome) => {
+                            emit(
+                                &app_reader,
+                                EVENT_TOOL,
+                                ToolPayload { summary: outcome.summary },
+                            );
+                            if let Some(ctx) = outcome.follow_up {
+                                follow_ups.push(ctx);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "tool execution failed");
+                            emit(
+                                &app_reader,
+                                EVENT_TOOL,
+                                ToolPayload { summary: format!("Falha ao executar comando: {e}") },
+                            );
+                        }
                     }
                 }
             }
+
+            // Flush trailing visible text held back for partial-tag detection.
+            let tail = filter.finish();
+            if !tail.is_empty() {
+                emit(&app_reader, EVENT_TOKEN, TokenPayload { token: tail });
+            }
+            (filter.visible_text().to_owned(), follow_ups)
+        });
+
+        // Engine owns `token_tx`; when it returns, the channel closes and the
+        // reader loop terminates.
+        let result = engine.generate(&prompt, token_tx).await;
+        let (full_text, follow_ups) = reader.await.unwrap_or_default();
+
+        if let Err(e) = result {
+            emit(app, EVENT_ERROR, ErrorPayload { message: e.to_string() });
+            break;
         }
 
-        // Flush any trailing visible text held back for partial-tag detection.
-        let tail = filter.finish();
-        if !tail.is_empty() {
-            emit(&app_reader, EVENT_TOKEN, TokenPayload { token: tail });
-        }
-        filter.visible_text().to_owned()
-    });
+        // Persist the assistant turn into short-term memory for continuity.
+        history.push_assistant(full_text.clone());
+        transcript.push_str(&full_text);
 
-    // Engine owns `token_tx`; when it returns, the channel closes and the
-    // reader loop terminates.
-    let result = engine.generate(&prompt, token_tx).await;
-    let full_text = reader.await.unwrap_or_default();
-
-    match result {
-        Ok(()) => {
-            // Persist the assistant turn into short-term memory for continuity.
-            history.push_assistant(full_text.clone());
-            emit(app, EVENT_DONE, DonePayload { full_text });
+        // A tool asked to inject context (e.g. file content): push it and run
+        // one more pass so the model answers over the new context.
+        if !follow_ups.is_empty() && pass < MAX_FOLLOW_UP_PASSES {
+            pass += 1;
+            for ctx in follow_ups {
+                history.push_user(ctx);
+            }
+            continue;
         }
-        Err(e) => emit(app, EVENT_ERROR, ErrorPayload { message: e.to_string() }),
+
+        emit(app, EVENT_DONE, DonePayload { full_text: transcript.clone() });
+        break;
     }
 
     emit(app, EVENT_STATE, StatePayload { state: CharacterState::Idle });

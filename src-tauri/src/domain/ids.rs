@@ -44,3 +44,4 @@ typed_id!(TaskId);
 typed_id!(EventId);
 typed_id!(NodeId);
 typed_id!(UserId);
+typed_id!(DelegateId);

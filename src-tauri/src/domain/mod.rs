@@ -1,5 +1,6 @@
 //! Domain layer: pure entities and value objects with no infrastructure deps.
 
+pub mod delegation;
 pub mod event;
 pub mod ids;
 pub mod mind_map;
@@ -8,9 +9,11 @@ pub mod user;
 
 // Public domain API surface; some re-exports are consumed only as features land.
 #[allow(unused_imports)]
+pub use delegation::DelegatedTask;
+#[allow(unused_imports)]
 pub use event::ScheduleEvent;
 #[allow(unused_imports)]
-pub use ids::{EventId, NodeId, TaskId, UserId};
+pub use ids::{DelegateId, EventId, NodeId, TaskId, UserId};
 #[allow(unused_imports)]
 pub use mind_map::MindMapNode;
 #[allow(unused_imports)]

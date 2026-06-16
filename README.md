@@ -91,16 +91,27 @@ The single integration TODO (the decode loop) is marked in
 - **Global hotkey** `Ctrl+Shift+K` (or double-click the character) → focuses the
   window and slides in a translucent Spotlight-style input. `Enter` sends the
   prompt and hides the input; `Esc` dismisses it.
-- **Tool calling**: Kensho can act on the system. The model is taught to emit an
-  inline tag, which the actor's stream filter strips from the visible text,
-  executes, and confirms with a native notification:
+- **Tool calling**: Kensho can act on the system. The model emits an inline tag,
+  which the actor's stream filter strips from the visible text, routes through
+  the `ToolRouter`, executes, and confirms with a native notification + a
+  transient on-screen **toast** (`tool://executed`). Built-in tools:
 
   ```
-  <CALL:ADD_TASK>Comprar pão|2026-06-20</CALL>
+  <CALL:ADD_TASK>Comprar pão|2026-06-20</CALL>        # personal task (date optional)
+  <CALL:DELEGATE>Rafaela|Corrigir bug no login</CALL>  # ticket → team member
+  <CALL:READ_FILE>/var/log/app/error.log</CALL>        # read + analyze a file
   ```
 
-  The date (`|AAAA-MM-DD`) is optional. Tags split across streamed tokens are
-  handled by `actor/stream_filter.rs`.
+  - `DELEGATE` validates the assignee against the dev team
+    (`Waldston`, `Joãozinho`, `Rafaela`) and stores an agile-issue payload in
+    the `delegated_tasks` table.
+  - `READ_FILE` reads a clamped slice (first/last 100 lines, ≤1 MB) and injects
+    it back into the rolling window, triggering a follow-up generation so the
+    model answers over the file content.
+
+  Tags split across streamed tokens are handled by `actor/stream_filter.rs`.
+  Adding a capability = implement the `Tool` trait + `register()` it — nothing
+  else changes (MCP-ready).
 
 ## IPC surface
 

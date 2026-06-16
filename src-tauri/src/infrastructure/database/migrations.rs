@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::core::AppResult;
 
 /// Bump this when adding a new migration step below.
-const TARGET_VERSION: i64 = 1;
+const TARGET_VERSION: i64 = 2;
 
 /// Ordered list of migration SQL scripts. Index + 1 == version it produces.
 const MIGRATIONS: &[&str] = &[
@@ -48,6 +48,19 @@ const MIGRATIONS: &[&str] = &[
 
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
     CREATE INDEX IF NOT EXISTS idx_events_start ON events (start_at);
+    "#,
+    // v2: delegated tasks (agile-board tickets assigned to team members)
+    r#"
+    CREATE TABLE IF NOT EXISTS delegated_tasks (
+        id          TEXT PRIMARY KEY NOT NULL,
+        assignee    TEXT NOT NULL,
+        description TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT 'open',
+        payload     TEXT NOT NULL DEFAULT '{}',
+        created_at  TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_delegated_assignee ON delegated_tasks (assignee);
     "#,
 ];
 

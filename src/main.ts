@@ -32,6 +32,7 @@ const sprite = document.getElementById("sprite") as HTMLImageElement;
 const bubble = document.getElementById("bubble") as HTMLElement;
 const stateLabel = document.getElementById("state-label") as HTMLElement;
 const characterEl = document.getElementById("character") as HTMLElement;
+const toast = document.getElementById("toast") as HTMLElement;
 const form = document.getElementById("ask-form") as HTMLFormElement;
 const input = document.getElementById("ask-input") as HTMLInputElement;
 
@@ -46,6 +47,18 @@ const character = new Character(stage, sprite, stateLabel, sprites);
 
 let streamBuffer = "";
 let alertTimer: number | undefined;
+let toastTimer: number | undefined;
+
+// Transient action confirmation under the character (3s).
+function showToast(text: string): void {
+  toast.textContent = text;
+  toast.classList.add("show");
+  if (toastTimer !== undefined) clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast.classList.remove("show");
+    toastTimer = undefined;
+  }, 3000);
+}
 
 // --- Spotlight-style input (hidden by default; slides in on focus) ---
 function openInput(): void {
@@ -94,9 +107,10 @@ async function bootstrap(): Promise<void> {
     showAlert();
   });
 
-  // A tool ran on the backend (e.g. task added) — surface a discreet confirmation.
+  // A tool ran on the backend (e.g. task added / delegated / file read) —
+  // surface a discreet, transient toast confirming the background action.
   await listen<ToolPayload>("tool://executed", (e) => {
-    bubble.textContent = `✓ ${e.payload.summary}`;
+    showToast(`✓ ${e.payload.summary}`);
   });
 }
 

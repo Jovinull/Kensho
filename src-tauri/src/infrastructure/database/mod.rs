@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::core::{AppError, AppResult};
-use crate::domain::{EventId, ScheduleEvent, Task, TaskPriority, TaskStatus};
+use crate::domain::{DelegatedTask, EventId, ScheduleEvent, Task, TaskPriority, TaskStatus};
 
 /// Cloneable handle to the embedded SQLite database.
 #[derive(Clone)]
@@ -130,6 +130,36 @@ impl Database {
         let conn = self.lock()?;
         let n = conn
             .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0);
+        Ok(n)
+    }
+
+    // -- events --------------------------------------------------------------
+
+    // -- delegated tasks -----------------------------------------------------
+
+    pub fn insert_delegated_task(&self, t: &DelegatedTask) -> AppResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO delegated_tasks (id, assignee, description, status, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                t.id.to_string(),
+                t.assignee,
+                t.description,
+                t.status,
+                t.payload,
+                t.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_delegated_tasks(&self) -> AppResult<i64> {
+        let conn = self.lock()?;
+        let n = conn
+            .query_row("SELECT COUNT(*) FROM delegated_tasks", [], |r| r.get(0))
             .optional()?
             .unwrap_or(0);
         Ok(n)
