@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100%" height="100%">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.25" />
+    </filter>
+  </defs>
+  <!-- Outer glowing ring / subtle tech element -->
+  <circle cx="50" cy="50" r="42" fill="none" stroke="#e0f2fe" stroke-width="2" stroke-dasharray="10 5" opacity="0.6" />
+  <!-- Main Body -->
+  <circle cx="50" cy="50" r="32" fill="#ffffff" stroke="#0ea5e9" stroke-width="3" filter="url(#shadow)" />
+  <!-- Cheeks -->
+  <circle cx="36" cy="54" r="3.5" fill="#38bdf8" opacity="0.4" />
+  <circle cx="64" cy="54" r="3.5" fill="#38bdf8" opacity="0.4" />
+  <!-- Eyes -->
+  <circle cx="40" cy="46" r="4" fill="#0f172a" />
+  <circle cx="60" cy="46" r="4" fill="#0f172a" />
+  <!-- Smile -->
+  <path d="M 46 56 Q 50 60 54 56" fill="none" stroke="#0f172a" stroke-width="2" stroke-linecap="round" />
+</svg>
