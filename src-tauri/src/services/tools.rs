@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{NaiveDate, TimeZone, Utc};
@@ -117,12 +118,28 @@ impl ToolRouter {
     /// Build the default router with all built-in capabilities.
     pub fn with_defaults(db: Database, notifier: Notifier) -> Self {
         let mut router = Self::new();
+
+        // Shared HTTP client for outbound webhooks (5s timeout, rustls).
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+        let webhook_url = std::env::var("KENSHO_TEAM_WEBHOOK_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+
         router.register(Arc::new(AddTaskTool {
             db: db.clone(),
             notifier: notifier.clone(),
         }));
-        router.register(Arc::new(DelegateTaskTool { db, notifier }));
+        router.register(Arc::new(DelegateTaskTool {
+            db,
+            notifier,
+            http,
+            webhook_url,
+        }));
         router.register(Arc::new(ReadLocalFileTool));
+        router.register(Arc::new(ShellCommandTool));
         router
     }
 
@@ -196,10 +213,14 @@ impl Tool for AddTaskTool {
     }
 }
 
-/// Delegate a ticket to a known team member (agile-board style).
+/// Delegate a ticket to a known team member (agile-board style) and, if a team
+/// webhook is configured, notify them externally over HTTP.
 struct DelegateTaskTool {
     db: Database,
     notifier: Notifier,
+    http: reqwest::Client,
+    /// `KENSHO_TEAM_WEBHOOK_URL` (Slack/Discord-style endpoint), if set.
+    webhook_url: Option<String>,
 }
 
 #[async_trait]
@@ -238,7 +259,86 @@ impl Tool for DelegateTaskTool {
             .map_err(join_err)??;
 
         notify(&self.notifier, format!("Tarefa delegada para {assignee}")).await;
-        Ok(ToolOutcome::summary(format!("Delegado para {assignee}")))
+
+        let mut summary = format!("Delegado para {assignee}");
+
+        // Best-effort external notification. Network failure is non-fatal: the
+        // ticket is already persisted; we just annotate the summary.
+        if let Some(url) = &self.webhook_url {
+            let payload = serde_json::json!({
+                "text": format!("📋 Nova tarefa para {}: {}", assignee, ticket.description),
+                "assignee": assignee,
+                "description": ticket.description,
+            });
+            match self.http.post(url).json(&payload).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!(%assignee, "team webhook notified");
+                }
+                Ok(resp) => {
+                    tracing::warn!(status = %resp.status(), "team webhook non-2xx");
+                    summary.push_str(" (notificação de rede falhou)");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "team webhook request failed");
+                    summary.push_str(" (notificação de rede falhou)");
+                }
+            }
+        }
+
+        Ok(ToolOutcome::summary(summary))
+    }
+}
+
+/// Run a shell command (`sh -c`) with a strict timeout, returning truncated
+/// stdout/stderr as follow-up context for the model to analyze.
+struct ShellCommandTool;
+
+const SHELL_TIMEOUT_SECS: u64 = 5;
+const SHELL_OUTPUT_MAX_CHARS: usize = 2000;
+
+#[async_trait]
+impl Tool for ShellCommandTool {
+    fn name(&self) -> &str {
+        "CMD"
+    }
+
+    async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
+        let cmd = raw_args.trim().to_string();
+        if cmd.is_empty() {
+            return Ok(ToolOutcome::summary("Comando vazio — ignorado."));
+        }
+
+        // `kill_on_drop` ensures the child dies if the timeout drops the future.
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(&cmd).kill_on_drop(true);
+
+        let combined = match tokio::time::timeout(
+            Duration::from_secs(SHELL_TIMEOUT_SECS),
+            command.output(),
+        )
+        .await
+        {
+            Ok(Ok(out)) => format!(
+                "[exit {}]\n[stdout]\n{}\n[stderr]\n{}",
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stdout).trim_end(),
+                String::from_utf8_lossy(&out.stderr).trim_end(),
+            ),
+            Ok(Err(e)) => format!("[erro ao executar: {e}]"),
+            Err(_) => format!("[timeout após {SHELL_TIMEOUT_SECS}s — processo encerrado]"),
+        };
+
+        let truncated = tail_chars(&combined, SHELL_OUTPUT_MAX_CHARS);
+        let injected = format!(
+            "Saída do comando `{cmd}`:\n```\n{truncated}\n```\n\
+             Analise o resultado e responda à solicitação do usuário.",
+        );
+        let short: String = cmd.chars().take(40).collect();
+
+        Ok(ToolOutcome::with_follow_up(
+            format!("Executando: {short}"),
+            injected,
+        ))
     }
 }
 
@@ -288,6 +388,17 @@ impl Tool for ReadLocalFileTool {
 
 fn join_err(e: tokio::task::JoinError) -> AppError {
     AppError::Other(anyhow::anyhow!("join error: {e}"))
+}
+
+/// Keep only the last `max` characters (char-safe), prefixing `…` when cut.
+fn tail_chars(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        s.to_string()
+    } else {
+        let tail: String = s.chars().skip(count - max).collect();
+        format!("…{tail}")
+    }
 }
 
 async fn notify(notifier: &Notifier, body: String) {
@@ -397,5 +508,34 @@ mod tests {
         let router = ToolRouter::with_defaults(db, Notifier::default());
         let out = router.dispatch(ToolCall::parse("NOPE>x")).await.expect("ok");
         assert!(out.summary.contains("desconhecido"));
+    }
+
+    #[tokio::test]
+    async fn shell_runs_harmless_command() {
+        let db = Database::open_in_memory().expect("db");
+        let router = ToolRouter::with_defaults(db, Notifier::default());
+        let out = router
+            .dispatch(ToolCall::parse("CMD>echo kensho-test"))
+            .await
+            .expect("dispatch");
+        assert!(out.summary.starts_with("Executando"));
+        let follow_up = out.follow_up.expect("command output");
+        assert!(follow_up.contains("kensho-test"));
+    }
+
+    #[tokio::test]
+    async fn delegate_marks_network_failure_but_still_persists() {
+        let db = Database::open_in_memory().expect("db");
+        // Webhook pointed at a closed port → request fails fast (refused).
+        let tool = DelegateTaskTool {
+            db: db.clone(),
+            notifier: Notifier::default(),
+            http: reqwest::Client::new(),
+            webhook_url: Some("http://127.0.0.1:9/webhook".to_string()),
+        };
+        let out = tool.execute("Rafaela|Corrigir bug").await.expect("execute");
+        assert!(out.summary.contains("Rafaela"));
+        assert!(out.summary.contains("rede")); // network-failure note
+        assert_eq!(db.count_delegated_tasks().expect("count"), 1); // persisted anyway
     }
 }

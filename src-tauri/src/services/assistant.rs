@@ -5,7 +5,7 @@
 use chrono::{Duration, Timelike, Utc};
 
 use crate::core::AppResult;
-use crate::domain::UserProfile;
+use crate::domain::{Task, UserProfile};
 use crate::infrastructure::Database;
 
 #[derive(Clone)]
@@ -55,7 +55,11 @@ impl AssistantService {
              \
              3) Ler um arquivo local para analisar (logs, código): \
              <CALL:READ_FILE>/caminho/absoluto/do/arquivo.ext</CALL> \
-             (após ler, o conteúdo voltará para você analisar e responder).",
+             (após ler, o conteúdo voltará para você analisar e responder). \
+             \
+             4) Executar um comando de terminal e analisar a saída: \
+             <CALL:CMD>git status</CALL> \
+             (use só comandos não-interativos e rápidos; a saída voltará para você).",
             name = self.profile.display_name,
             persona = self.profile.persona,
             locale = self.profile.locale,
@@ -100,8 +104,65 @@ impl AssistantService {
         parts.join(" ")
     }
 
+    /// Open tasks whose deadline falls within today (used by the heartbeat).
+    pub fn pending_due_today(&self) -> AppResult<Vec<Task>> {
+        let now = Utc::now();
+        let day_start = now - Duration::hours(now.hour() as i64);
+        let day_end = day_start + Duration::days(1);
+        self.db.pending_tasks_due_between(day_start, day_end)
+    }
+
+    /// Build the synthetic system nudge that drives a proactive reminder.
+    /// Returns `None` when there is nothing to remind about.
+    pub fn deadline_reminder_prompt(tasks: &[Task]) -> Option<String> {
+        if tasks.is_empty() {
+            return None;
+        }
+        let titles: Vec<&str> = tasks.iter().take(5).map(|t| t.title.as_str()).collect();
+        Some(format!(
+            "[AVISO DO SISTEMA] {} tarefa(s) vencem hoje e seguem pendentes: {}. \
+             Gere um lembrete curto, gentil e proativo cobrando o usuário sobre \
+             elas. Não use nenhuma tag de ferramenta.",
+            tasks.len(),
+            titles.join("; ")
+        ))
+    }
+
     /// Placeholder for proactive-reminder logic (checked by a future scheduler).
     pub fn should_nudge(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::Database;
+
+    #[test]
+    fn reminder_prompt_empty_is_none() {
+        assert!(AssistantService::deadline_reminder_prompt(&[]).is_none());
+    }
+
+    #[test]
+    fn reminder_prompt_lists_titles() {
+        let tasks = vec![Task::new("Deploy"), Task::new("Code review")];
+        let p = AssistantService::deadline_reminder_prompt(&tasks).expect("some");
+        assert!(p.contains("Deploy"));
+        assert!(p.contains("Code review"));
+        assert!(p.contains("AVISO DO SISTEMA"));
+    }
+
+    #[test]
+    fn pending_due_today_finds_task_due_today() {
+        let db = Database::open_in_memory().expect("db");
+        let mut task = Task::new("Entregar relatório");
+        task.due_at = Some(Utc::now());
+        db.insert_task(&task).expect("insert");
+
+        let svc = AssistantService::new(db);
+        let due = svc.pending_due_today().expect("query");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].title, "Entregar relatório");
     }
 }

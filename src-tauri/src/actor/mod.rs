@@ -14,12 +14,17 @@ mod stream_filter;
 
 pub use stream_filter::StreamFilter;
 
+use std::collections::HashSet;
+use std::time::Duration;
+
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
 use crate::core::AppError;
+use crate::domain::TaskId;
 use crate::infrastructure::llm::InferenceEngine;
+use crate::infrastructure::Notifier;
 use crate::services::{conversation, AssistantService, History, ToolCall, ToolRouter};
 
 // Event names shared with the frontend (`src/main.ts`).
@@ -36,6 +41,7 @@ pub enum CharacterState {
     Idle,
     Thinking,
     Speaking,
+    Alert,
 }
 
 #[derive(Serialize, Clone)]
@@ -90,40 +96,103 @@ impl LlmHandle {
 /// Number of user/assistant turns retained in the rolling memory window.
 const HISTORY_TURNS: usize = 6;
 
+/// Dependencies handed to the actor worker.
+pub struct ActorDeps {
+    pub router: ToolRouter,
+    pub assistant: AssistantService,
+    pub notifier: Notifier,
+    /// Proactive heartbeat interval.
+    pub heartbeat: Duration,
+}
+
 /// Spawn the persistent worker and return a handle to it.
-pub fn spawn(
-    app: AppHandle,
-    mut engine: Box<dyn InferenceEngine>,
-    router: ToolRouter,
-    assistant: AssistantService,
-) -> LlmHandle {
+pub fn spawn(app: AppHandle, mut engine: Box<dyn InferenceEngine>, deps: ActorDeps) -> LlmHandle {
     let (tx, mut rx) = mpsc::channel::<LlmCommand>(32);
 
     tauri::async_runtime::spawn(async move {
-        // Short-term memory lives with the worker for the session's lifetime.
+        // Short-term memory + which deadlines were already nudged this session.
         let mut history = History::new(HISTORY_TURNS);
+        let mut nudged: HashSet<TaskId> = HashSet::new();
+
+        let mut ticker = tokio::time::interval(deps.heartbeat);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick fires immediately; consume it so we don't nudge at boot.
+        ticker.tick().await;
+
         tracing::info!(model = engine.model_id(), "llm actor started");
 
-        while let Some(cmd) = rx.recv().await {
-            match cmd {
-                LlmCommand::Generate { user_input } => {
-                    run_generation(
-                        &app,
-                        engine.as_mut(),
-                        &router,
-                        &assistant,
-                        &mut history,
-                        user_input,
-                    )
-                    .await;
+        loop {
+            tokio::select! {
+                cmd = rx.recv() => {
+                    match cmd {
+                        Some(LlmCommand::Generate { user_input }) => {
+                            run_generation(
+                                &app,
+                                engine.as_mut(),
+                                &deps.router,
+                                &deps.assistant,
+                                &mut history,
+                                user_input,
+                            )
+                            .await;
+                        }
+                        Some(LlmCommand::Shutdown) | None => break,
+                    }
                 }
-                LlmCommand::Shutdown => break,
+                _ = ticker.tick() => {
+                    heartbeat(&app, engine.as_mut(), &deps, &mut history, &mut nudged).await;
+                }
             }
         }
         tracing::info!("llm actor stopped");
     });
 
     LlmHandle { tx }
+}
+
+/// Proactive tick: find tasks due today (not yet nudged), alert the user via a
+/// native notification + the `alert` sprite, and have Kensho generate a nudge.
+async fn heartbeat(
+    app: &AppHandle,
+    engine: &mut dyn InferenceEngine,
+    deps: &ActorDeps,
+    history: &mut History,
+    nudged: &mut HashSet<TaskId>,
+) {
+    let assistant = deps.assistant.clone();
+    let due = match tokio::task::spawn_blocking(move || assistant.pending_due_today()).await {
+        Ok(Ok(tasks)) => tasks,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "heartbeat query failed");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "heartbeat join failed");
+            return;
+        }
+    };
+
+    // Only nudge each task once per session.
+    let fresh: Vec<_> = due.into_iter().filter(|t| !nudged.contains(&t.id)).collect();
+    if fresh.is_empty() {
+        return;
+    }
+    for t in &fresh {
+        nudged.insert(t.id);
+    }
+    tracing::info!(count = fresh.len(), "heartbeat: deadlines due today");
+
+    // Native Ubuntu notification + alert sprite.
+    let titles: Vec<String> = fresh.iter().take(5).map(|t| t.title.clone()).collect();
+    let body = format!("{} tarefa(s) vencendo hoje: {}", fresh.len(), titles.join("; "));
+    let notifier = deps.notifier.clone();
+    let _ = tokio::task::spawn_blocking(move || notifier.notify("Kensho — Lembrete", &body)).await;
+    emit(app, EVENT_STATE, StatePayload { state: CharacterState::Alert });
+
+    // Synthetic, invisible system turn → Kensho generates the reminder text.
+    if let Some(prompt) = AssistantService::deadline_reminder_prompt(&fresh) {
+        run_generation(app, engine, &deps.router, &deps.assistant, history, prompt).await;
+    }
 }
 
 /// Drive one request: Thinking → stream tokens (Speaking) → done/error → Idle.

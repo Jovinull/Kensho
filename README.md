@@ -100,14 +100,25 @@ The single integration TODO (the decode loop) is marked in
   <CALL:ADD_TASK>Comprar pão|2026-06-20</CALL>        # personal task (date optional)
   <CALL:DELEGATE>Rafaela|Corrigir bug no login</CALL>  # ticket → team member
   <CALL:READ_FILE>/var/log/app/error.log</CALL>        # read + analyze a file
+  <CALL:CMD>git status</CALL>                          # run a shell command
   ```
 
   - `DELEGATE` validates the assignee against the dev team
-    (`Waldston`, `Joãozinho`, `Rafaela`) and stores an agile-issue payload in
-    the `delegated_tasks` table.
+    (`Waldston`, `Joãozinho`, `Rafaela`), stores an agile-issue payload in the
+    `delegated_tasks` table, and (if `KENSHO_TEAM_WEBHOOK_URL` is set) POSTs a
+    JSON notification to a Slack/Discord-style endpoint. Network failure is
+    non-fatal — the ticket persists and the summary notes the failure.
   - `READ_FILE` reads a clamped slice (first/last 100 lines, ≤1 MB) and injects
-    it back into the rolling window, triggering a follow-up generation so the
-    model answers over the file content.
+    it back into the rolling window, triggering a follow-up generation.
+  - `CMD` runs `sh -c <cmd>` with a strict 5s timeout (`kill_on_drop`), truncates
+    output to the last 2000 chars, and injects it back for analysis.
+
+## Proactivity (heartbeat)
+
+A `tokio::time::interval` in the actor ticks every `KENSHO_HEARTBEAT_SECS`
+(default 300). On each tick it queries SQLite for tasks due today that are still
+pending; for any not yet nudged this session it fires a native notification,
+switches the sprite to `alert`, and has Kensho generate a reminder.
 
   Tags split across streamed tokens are handled by `actor/stream_filter.rs`.
   Adding a capability = implement the `Tool` trait + `register()` it — nothing

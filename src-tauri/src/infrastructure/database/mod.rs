@@ -105,6 +105,30 @@ impl Database {
         Ok(out)
     }
 
+    /// Open tasks whose deadline falls within `[start, end]`. Used by the
+    /// proactive heartbeat to find work due today.
+    pub fn pending_tasks_due_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> AppResult<Vec<Task>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, description, status, priority, due_at, created_at, updated_at
+             FROM tasks
+             WHERE status IN ('pending', 'in_progress')
+               AND due_at IS NOT NULL
+               AND due_at >= ?1 AND due_at <= ?2
+             ORDER BY priority DESC, due_at ASC",
+        )?;
+        let rows = stmt.query_map([start.to_rfc3339(), end.to_rfc3339()], row_to_task)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Agenda events starting within `[start, end]`.
     pub fn events_between(
         &self,

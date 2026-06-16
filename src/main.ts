@@ -11,8 +11,9 @@ import alertUrl from "./assets/character/alert.svg";
 import "./styles.css";
 
 // --- Event payload contracts (must match the Rust `actor` module) ---
+// Backend now also emits "alert" (proactive heartbeat reminders).
 interface StatePayload {
-  state: Exclude<CharacterState, "alert">;
+  state: CharacterState;
 }
 interface TokenPayload {
   token: string;

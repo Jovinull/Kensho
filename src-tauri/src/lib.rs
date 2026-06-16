@@ -54,9 +54,15 @@ pub fn run() {
 
             // Local inference engine (mock by default; gguf with --features llama)
             // owned exclusively by the actor task, which also owns the rolling
-            // conversation history and the tool router.
+            // conversation history, the tool router and the proactive heartbeat.
             let engine = llm::build_engine(&config);
-            let llm_handle = actor::spawn(handle.clone(), engine, router, assistant);
+            let deps = actor::ActorDeps {
+                router,
+                assistant,
+                notifier: notifier.clone(),
+                heartbeat: std::time::Duration::from_secs(config.heartbeat_secs),
+            };
+            let llm_handle = actor::spawn(handle.clone(), engine, deps);
 
             // Apply the floating-widget always-on-top preference.
             if let Some(win) = app.get_webview_window("main") {

@@ -38,6 +38,9 @@ anyhow = "1"
 # --- Native Ubuntu notifications via D-Bus ---
 notify-rust = "4"
 
+# --- Outbound HTTP (team webhooks). rustls avoids a heavy OpenSSL build dep. ---
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # --- Structured logging ---
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

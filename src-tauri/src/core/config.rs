@@ -22,6 +22,8 @@ pub struct SystemConfig {
     /// LLM context window size (tokens). Bounds KV-cache RAM usage.
     /// Read from `KENSHO_CTX` when set.
     pub context_size: u32,
+    /// Proactive heartbeat interval in seconds. Read from `KENSHO_HEARTBEAT_SECS`.
+    pub heartbeat_secs: u64,
 }
 
 impl SystemConfig {
@@ -39,6 +41,12 @@ impl SystemConfig {
             .filter(|&v| v >= 256)
             .unwrap_or(2048);
 
+        let heartbeat_secs = std::env::var("KENSHO_HEARTBEAT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v >= 10)
+            .unwrap_or(300);
+
         Self {
             data_dir,
             database_path,
@@ -46,6 +54,7 @@ impl SystemConfig {
             always_on_top: true,
             max_tokens: 512,
             context_size,
+            heartbeat_secs,
         }
     }
 }
