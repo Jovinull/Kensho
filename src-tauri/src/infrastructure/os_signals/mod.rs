@@ -3,6 +3,7 @@
 use crate::core::{AppError, AppResult};
 
 /// Thin wrapper around the system notification daemon.
+#[derive(Clone)]
 pub struct Notifier {
     app_name: String,
 }

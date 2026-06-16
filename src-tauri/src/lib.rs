@@ -19,11 +19,11 @@ mod infrastructure;
 mod services;
 mod tauri_commands;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::core::SystemConfig;
 use crate::infrastructure::{llm, Database, Notifier};
-use crate::services::AssistantService;
+use crate::services::{AssistantService, ToolExecutor};
 
 /// Build and run the Tauri application.
 pub fn run() {
@@ -45,18 +45,45 @@ pub fn run() {
             // Persistence (creates db + tables on first run).
             let db = Database::open(&config.database_path)?;
 
+            // Adapters + tool executor (DB writes + native Ubuntu notifications).
+            let notifier = Notifier::default();
+            let tools = ToolExecutor::new(db.clone(), notifier.clone());
+
             // Local inference engine (mock by default; gguf with --features llama)
             // owned exclusively by the actor task.
             let engine = llm::build_engine(&config);
-            let llm_handle = actor::spawn(handle.clone(), engine);
+            let llm_handle = actor::spawn(handle.clone(), engine, tools);
 
-            // Services + adapters shared via managed state.
+            // Services shared via managed state.
             let assistant = AssistantService::new(db.clone());
-            let notifier = Notifier::default();
 
             // Apply the floating-widget always-on-top preference.
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_always_on_top(config.always_on_top);
+            }
+
+            // Global hotkey (Ctrl+Shift+K): focus Kensho and open the input.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::{
+                    Builder as ShortcutBuilder, Code, Modifiers, Shortcut, ShortcutState,
+                };
+                let toggle = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyK);
+                app.handle().plugin(
+                    ShortcutBuilder::new()
+                        .with_shortcut(toggle)?
+                        .with_handler(move |app, _shortcut, event| {
+                            if event.state == ShortcutState::Pressed {
+                                if let Some(win) = app.get_webview_window("main") {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                    let _ = app.emit("ui://focus-input", ());
+                                }
+                            }
+                        })
+                        .build(),
+                )?;
+                tracing::info!("global shortcut Ctrl+Shift+K registered");
             }
 
             app.manage(config);

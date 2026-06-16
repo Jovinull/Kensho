@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::core::{AppError, AppResult};
-use crate::domain::{ScheduleEvent, Task, TaskPriority, TaskStatus};
+use crate::domain::{EventId, ScheduleEvent, Task, TaskPriority, TaskStatus};
 
 /// Cloneable handle to the embedded SQLite database.
 #[derive(Clone)]
@@ -78,18 +78,47 @@ impl Database {
             "SELECT id, title, description, status, priority, due_at, created_at, updated_at
              FROM tasks ORDER BY priority DESC, created_at ASC",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Task {
-                id: parse_id(row.get::<_, String>(0)?),
-                title: row.get(1)?,
-                description: row.get(2)?,
-                status: TaskStatus::from_str_lossy(&row.get::<_, String>(3)?),
-                priority: TaskPriority::from_i64(row.get(4)?),
-                due_at: parse_dt_opt(row.get::<_, Option<String>>(5)?),
-                created_at: parse_dt(row.get::<_, String>(6)?),
-                updated_at: parse_dt(row.get::<_, String>(7)?),
-            })
-        })?;
+        let rows = stmt.query_map([], row_to_task)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Open, not-yet-done tasks that are due by `when` (or have no due date).
+    /// Used by the assistant to inject "today's pending work" into the prompt.
+    pub fn pending_tasks_due_by(&self, when: DateTime<Utc>) -> AppResult<Vec<Task>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, description, status, priority, due_at, created_at, updated_at
+             FROM tasks
+             WHERE status IN ('pending', 'in_progress')
+               AND (due_at IS NULL OR due_at <= ?1)
+             ORDER BY priority DESC, due_at ASC",
+        )?;
+        let rows = stmt.query_map([when.to_rfc3339()], row_to_task)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Agenda events starting within `[start, end]`.
+    pub fn events_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> AppResult<Vec<ScheduleEvent>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, notes, start_at, end_at, reminded, created_at
+             FROM events
+             WHERE start_at >= ?1 AND start_at <= ?2
+             ORDER BY start_at ASC",
+        )?;
+        let rows = stmt.query_map([start.to_rfc3339(), end.to_rfc3339()], row_to_event)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -141,4 +170,29 @@ fn parse_dt_opt(s: Option<String>) -> Option<DateTime<Utc>> {
 
 fn parse_id<T: std::str::FromStr + Default>(s: String) -> T {
     s.parse().unwrap_or_default()
+}
+
+fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
+    Ok(Task {
+        id: parse_id(row.get::<_, String>(0)?),
+        title: row.get(1)?,
+        description: row.get(2)?,
+        status: TaskStatus::from_str_lossy(&row.get::<_, String>(3)?),
+        priority: TaskPriority::from_i64(row.get(4)?),
+        due_at: parse_dt_opt(row.get::<_, Option<String>>(5)?),
+        created_at: parse_dt(row.get::<_, String>(6)?),
+        updated_at: parse_dt(row.get::<_, String>(7)?),
+    })
+}
+
+fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<ScheduleEvent> {
+    Ok(ScheduleEvent {
+        id: parse_id::<EventId>(row.get::<_, String>(0)?),
+        title: row.get(1)?,
+        notes: row.get(2)?,
+        start_at: parse_dt(row.get::<_, String>(3)?),
+        end_at: parse_dt_opt(row.get::<_, Option<String>>(4)?),
+        reminded: row.get::<_, i64>(5)? != 0,
+        created_at: parse_dt(row.get::<_, String>(6)?),
+    })
 }

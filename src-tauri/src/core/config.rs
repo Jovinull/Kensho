@@ -19,6 +19,9 @@ pub struct SystemConfig {
     pub always_on_top: bool,
     /// Max tokens generated per inference request.
     pub max_tokens: usize,
+    /// LLM context window size (tokens). Bounds KV-cache RAM usage.
+    /// Read from `KENSHO_CTX` when set.
+    pub context_size: u32,
 }
 
 impl SystemConfig {
@@ -30,12 +33,19 @@ impl SystemConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("models").join("qwen.gguf"));
 
+        let context_size = std::env::var("KENSHO_CTX")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v >= 256)
+            .unwrap_or(2048);
+
         Self {
             data_dir,
             database_path,
             model_path,
             always_on_top: true,
             max_tokens: 512,
+            context_size,
         }
     }
 }
