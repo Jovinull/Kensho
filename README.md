@@ -67,10 +67,10 @@ The default build ships a **MockEngine** that fakes token streaming, so the full
 pipeline runs with no model and no C++ build. To use a real Qwen `.gguf`:
 
 ```bash
-export KENSHO_MODEL_PATH=/path/to/qwen.gguf
+./scripts/download_qwen.sh            # downloads a tiny Qwen2.5-0.5B GGUF into .models/
+export KENSHO_MODEL_PATH=$(pwd)/.models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 export KENSHO_CTX=2048               # optional: context window (default 2048)
-cd src-tauri
-cargo build --features llama         # compiles llama.cpp (needs cmake + C++)
+npm run tauri dev -- --features llama # run the app with the real engine
 ```
 
 Build prerequisites for the `llama` feature (bindgen needs clang headers):
@@ -86,8 +86,25 @@ the real `llama-cpp-2` backend touches nothing outside `infrastructure/llm/`.
 The single integration TODO (the decode loop) is marked in
 `src-tauri/src/infrastructure/llm/llama.rs`.
 
+## Interacting with Kensho
+
+- **Global hotkey** `Ctrl+Shift+K` (or double-click the character) → focuses the
+  window and slides in a translucent Spotlight-style input. `Enter` sends the
+  prompt and hides the input; `Esc` dismisses it.
+- **Tool calling**: Kensho can act on the system. The model is taught to emit an
+  inline tag, which the actor's stream filter strips from the visible text,
+  executes, and confirms with a native notification:
+
+  ```
+  <CALL:ADD_TASK>Comprar pão|2026-06-20</CALL>
+  ```
+
+  The date (`|AAAA-MM-DD`) is optional. Tags split across streamed tokens are
+  handled by `actor/stream_filter.rs`.
+
 ## IPC surface
 
 Commands: `ask_assistant`, `create_task`, `list_tasks`, `send_notification`,
 `set_always_on_top`, `app_info`.
-Events emitted: `character://state`, `llm://token`, `llm://done`, `llm://error`.
+Events emitted: `character://state`, `llm://token`, `llm://done`, `llm://error`,
+`tool://executed`; consumed: `ui://focus-input` (from the global hotkey).

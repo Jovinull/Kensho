@@ -201,3 +201,42 @@ fn decode_loop(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    /// Real end-to-end inference against a local GGUF.
+    /// Ignored by default; run explicitly once KENSHO_MODEL_PATH points at a model:
+    ///   cargo test --features llama -- --ignored real_inference_streams_tokens
+    #[tokio::test]
+    #[ignore]
+    async fn real_inference_streams_tokens() {
+        let tmp = std::env::temp_dir().join("kensho-test");
+        let config = SystemConfig::from_data_dir(&tmp);
+        assert!(
+            config.model_path.exists(),
+            "set KENSHO_MODEL_PATH to a .gguf before running this test"
+        );
+
+        let mut engine = LlamaEngine::load(&config).expect("load model");
+        let (tx, mut rx) = mpsc::channel::<String>(256);
+
+        let gen = tokio::spawn(async move {
+            engine
+                .generate("Diga olá em uma frase curta.", tx)
+                .await
+                .expect("generate");
+        });
+
+        let mut out = String::new();
+        while let Some(tok) = rx.recv().await {
+            out.push_str(&tok);
+        }
+        gen.await.expect("join");
+
+        println!("model output: {out}");
+        assert!(!out.trim().is_empty(), "expected non-empty generation");
+    }
+}
