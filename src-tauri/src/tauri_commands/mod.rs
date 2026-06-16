@@ -11,17 +11,16 @@ use crate::actor::LlmHandle;
 use crate::core::CommandError;
 use crate::domain::Task;
 use crate::infrastructure::{Database, Notifier};
-use crate::services::AssistantService;
 
-/// Forward a user prompt to the LLM actor. Returns immediately; the answer
-/// streams back via the `llm://token` / `llm://done` events.
+/// Forward raw user input to the LLM actor. Returns immediately; the actor wraps
+/// it in ChatML + rolling history and streams the answer back via the
+/// `llm://token` / `llm://done` events.
 #[tauri::command]
 pub async fn ask_assistant(
     prompt: String,
-    service: State<'_, AssistantService>,
     handle: State<'_, LlmHandle>,
 ) -> Result<(), CommandError> {
-    service.ask(handle.inner(), &prompt).await?;
+    handle.generate(prompt).await?;
     Ok(())
 }
 

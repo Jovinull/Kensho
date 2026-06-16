@@ -149,12 +149,25 @@ fn decode_loop(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(1234);
+    // Anti-loop sampler chain: a moderate repetition penalty stops runaway
+    // repeats without breaking pt-BR, balanced temperature for an assistant.
+    //   penalties(last_n, repeat=1.12, freq=0.0, present=0.0)
     let mut sampler = LlamaSampler::chain_simple([
+        LlamaSampler::penalties(64, 1.12, 0.0, 0.0),
         LlamaSampler::top_k(40),
-        LlamaSampler::top_p(0.95, 1),
-        LlamaSampler::temp(0.8),
+        LlamaSampler::top_p(0.9, 1),
+        LlamaSampler::temp(0.7),
         LlamaSampler::dist(seed),
     ]);
+
+    // Explicit stop sequence: halt as soon as the model emits `<|im_end|>`.
+    // Resolved to its token id when the tokenizer maps it to a single special
+    // token; otherwise we still rely on `is_eog_token`.
+    let im_end_id = model
+        .str_to_token("<|im_end|>", AddBos::Never)
+        .ok()
+        .filter(|v| v.len() == 1)
+        .map(|v| v[0]);
 
     let mut n_cur = batch.n_tokens();
     // Stop at the smaller of: prompt + max_tokens, or the context window.
@@ -168,13 +181,16 @@ fn decode_loop(
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
         sampler.accept(token);
 
-        if model.is_eog_token(token) {
+        // Stop sequence + end-of-generation.
+        if model.is_eog_token(token) || Some(token) == im_end_id {
             break;
         }
 
+        // Plaintext: special/control tokens render empty, never leaking machine
+        // markup (e.g. `<|im_end|>`) into the user-facing stream.
         #[allow(deprecated)]
         let bytes = model
-            .token_to_bytes(token, llama_cpp_2::model::Special::Tokenize)
+            .token_to_bytes(token, llama_cpp_2::model::Special::Plaintext)
             .map_err(|e| LlmError::Inference(format!("detokenize failed: {e}")))?;
         byte_buf.extend_from_slice(&bytes);
 
@@ -223,11 +239,14 @@ mod tests {
         let mut engine = LlamaEngine::load(&config).expect("load model");
         let (tx, mut rx) = mpsc::channel::<String>(256);
 
+        // Proper ChatML prompt — exercises the fixed path + `<|im_end|>` stop.
+        let prompt = "<|im_start|>system\nVocê é Kensho, responda em pt-BR de forma breve.\
+                      <|im_end|>\n<|im_start|>user\nDiga olá em uma frase curta.\
+                      <|im_end|>\n<|im_start|>assistant\n"
+            .to_string();
+
         let gen = tokio::spawn(async move {
-            engine
-                .generate("Diga olá em uma frase curta.", tx)
-                .await
-                .expect("generate");
+            engine.generate(&prompt, tx).await.expect("generate");
         });
 
         let mut out = String::new();

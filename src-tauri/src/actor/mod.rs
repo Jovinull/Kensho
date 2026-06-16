@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::core::AppError;
 use crate::infrastructure::llm::InferenceEngine;
-use crate::services::{ToolCall, ToolExecutor};
+use crate::services::{conversation, AssistantService, History, ToolCall, ToolRouter};
 
 // Event names shared with the frontend (`src/main.ts`).
 pub const EVENT_STATE: &str = "character://state";
@@ -61,7 +61,8 @@ struct ToolPayload {
 
 /// Messages accepted by the actor.
 pub enum LlmCommand {
-    Generate { prompt: String },
+    /// Raw user input; the actor wraps it in ChatML + history before inference.
+    Generate { user_input: String },
     Shutdown,
 }
 
@@ -73,9 +74,9 @@ pub struct LlmHandle {
 
 impl LlmHandle {
     /// Queue a generation request. Returns immediately (non-blocking).
-    pub async fn generate(&self, prompt: String) -> Result<(), AppError> {
+    pub async fn generate(&self, user_input: String) -> Result<(), AppError> {
         self.tx
-            .send(LlmCommand::Generate { prompt })
+            .send(LlmCommand::Generate { user_input })
             .await
             .map_err(|_| AppError::WorkerUnavailable)
     }
@@ -86,20 +87,35 @@ impl LlmHandle {
     }
 }
 
+/// Number of user/assistant turns retained in the rolling memory window.
+const HISTORY_TURNS: usize = 6;
+
 /// Spawn the persistent worker and return a handle to it.
 pub fn spawn(
     app: AppHandle,
     mut engine: Box<dyn InferenceEngine>,
-    tools: ToolExecutor,
+    router: ToolRouter,
+    assistant: AssistantService,
 ) -> LlmHandle {
     let (tx, mut rx) = mpsc::channel::<LlmCommand>(32);
 
     tauri::async_runtime::spawn(async move {
+        // Short-term memory lives with the worker for the session's lifetime.
+        let mut history = History::new(HISTORY_TURNS);
         tracing::info!(model = engine.model_id(), "llm actor started");
+
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                LlmCommand::Generate { prompt } => {
-                    run_generation(&app, engine.as_mut(), &tools, prompt).await;
+                LlmCommand::Generate { user_input } => {
+                    run_generation(
+                        &app,
+                        engine.as_mut(),
+                        &router,
+                        &assistant,
+                        &mut history,
+                        user_input,
+                    )
+                    .await;
                 }
                 LlmCommand::Shutdown => break,
             }
@@ -114,9 +130,17 @@ pub fn spawn(
 async fn run_generation(
     app: &AppHandle,
     engine: &mut dyn InferenceEngine,
-    tools: &ToolExecutor,
-    prompt: String,
+    router: &ToolRouter,
+    assistant: &AssistantService,
+    history: &mut History,
+    user_input: String,
 ) {
+    // Record the user turn, then build the ChatML prompt: system (live DB
+    // context + tools) + rolling history (which now ends with this user turn).
+    history.push_user(user_input);
+    let system = assistant.system_prompt().unwrap_or_default();
+    let prompt = conversation::to_chatml(&system, history);
+
     emit(app, EVENT_STATE, StatePayload { state: CharacterState::Thinking });
 
     let (token_tx, mut token_rx) = mpsc::channel::<String>(64);
@@ -124,7 +148,7 @@ async fn run_generation(
     // Reader task: filters tool calls out of the stream, forwards visible text
     // to the UI, executes detected tools, and accumulates the visible text.
     let app_reader = app.clone();
-    let tools_reader = tools.clone();
+    let router_reader = router.clone();
     let reader = tauri::async_runtime::spawn(async move {
         let mut filter = StreamFilter::new();
         let mut spoke = false;
@@ -146,7 +170,7 @@ async fn run_generation(
 
             for body in calls {
                 let call = ToolCall::parse(&body);
-                match tools_reader.execute(call).await {
+                match router_reader.dispatch(call).await {
                     Ok(summary) => {
                         emit(&app_reader, EVENT_TOOL, ToolPayload { summary });
                     }
@@ -176,7 +200,11 @@ async fn run_generation(
     let full_text = reader.await.unwrap_or_default();
 
     match result {
-        Ok(()) => emit(app, EVENT_DONE, DonePayload { full_text }),
+        Ok(()) => {
+            // Persist the assistant turn into short-term memory for continuity.
+            history.push_assistant(full_text.clone());
+            emit(app, EVENT_DONE, DonePayload { full_text });
+        }
         Err(e) => emit(app, EVENT_ERROR, ErrorPayload { message: e.to_string() }),
     }
 

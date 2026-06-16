@@ -1,14 +1,14 @@
-//! Assistant orchestration: assembles user context, builds the final prompt,
-//! and dispatches it to the LLM actor. This is where "when to nudge the user"
-//! and "how to chain context" logic lives.
+//! Assistant orchestration: builds the dynamic, context-aware **system prompt**
+//! (today's tasks/events + tool instructions). ChatML wrapping and the rolling
+//! history live in [`crate::services::conversation`]; the actor owns the loop.
 
 use chrono::{Duration, Timelike, Utc};
 
-use crate::actor::LlmHandle;
 use crate::core::AppResult;
 use crate::domain::UserProfile;
 use crate::infrastructure::Database;
 
+#[derive(Clone)]
 pub struct AssistantService {
     db: Database,
     profile: UserProfile,
@@ -22,10 +22,10 @@ impl AssistantService {
         }
     }
 
-    /// Compose a context-aware prompt. Queries SQLite for today's pending tasks
-    /// and agenda events, then injects them into an invisible system prompt so
-    /// the model answers with awareness of the user's real state.
-    pub fn build_prompt(&self, user_input: &str) -> AppResult<String> {
+    /// Build the dynamic **system prompt**: persona + today's tasks/events
+    /// (queried from SQLite) + the tool-calling protocol. This is the invisible
+    /// `system` role content; the conversation layer wraps it in ChatML.
+    pub fn system_prompt(&self) -> AppResult<String> {
         let now = Utc::now();
         // Naive day window in UTC; timezone-aware windowing is a later concern.
         let day_start = now - Duration::hours(now.hour() as i64);
@@ -54,7 +54,7 @@ impl AssistantService {
             context = context,
         );
 
-        Ok(format!("{system}\n\nUsuário: {user_input}\nKensho:"))
+        Ok(system)
     }
 
     /// Turn the persisted state into a compact natural-language context block.
@@ -90,12 +90,6 @@ impl AssistantService {
         }
 
         parts.join(" ")
-    }
-
-    /// Build the prompt and forward it to the actor (non-blocking).
-    pub async fn ask(&self, handle: &LlmHandle, user_input: &str) -> AppResult<()> {
-        let prompt = self.build_prompt(user_input)?;
-        handle.generate(prompt).await
     }
 
     /// Placeholder for proactive-reminder logic (checked by a future scheduler).

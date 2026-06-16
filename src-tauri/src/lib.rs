@@ -23,7 +23,7 @@ use tauri::{Emitter, Manager};
 
 use crate::core::SystemConfig;
 use crate::infrastructure::{llm, Database, Notifier};
-use crate::services::{AssistantService, ToolExecutor};
+use crate::services::{AssistantService, ToolRouter};
 
 /// Build and run the Tauri application.
 pub fn run() {
@@ -45,17 +45,18 @@ pub fn run() {
             // Persistence (creates db + tables on first run).
             let db = Database::open(&config.database_path)?;
 
-            // Adapters + tool executor (DB writes + native Ubuntu notifications).
+            // Adapters + extensible tool router (DB writes + native notifications).
             let notifier = Notifier::default();
-            let tools = ToolExecutor::new(db.clone(), notifier.clone());
+            let router = ToolRouter::with_defaults(db.clone(), notifier.clone());
+
+            // System-prompt composer (live DB context + tool protocol).
+            let assistant = AssistantService::new(db.clone());
 
             // Local inference engine (mock by default; gguf with --features llama)
-            // owned exclusively by the actor task.
+            // owned exclusively by the actor task, which also owns the rolling
+            // conversation history and the tool router.
             let engine = llm::build_engine(&config);
-            let llm_handle = actor::spawn(handle.clone(), engine, tools);
-
-            // Services shared via managed state.
-            let assistant = AssistantService::new(db.clone());
+            let llm_handle = actor::spawn(handle.clone(), engine, router, assistant);
 
             // Apply the floating-widget always-on-top preference.
             if let Some(win) = app.get_webview_window("main") {
@@ -89,7 +90,6 @@ pub fn run() {
             app.manage(config);
             app.manage(db);
             app.manage(llm_handle);
-            app.manage(assistant);
             app.manage(notifier);
 
             Ok(())

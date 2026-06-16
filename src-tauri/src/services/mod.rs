@@ -2,7 +2,12 @@
 //! infrastructure. No Tauri types leak in here.
 
 pub mod assistant;
+pub mod conversation;
 pub mod tools;
 
 pub use assistant::AssistantService;
-pub use tools::{ToolCall, ToolExecutor};
+// Public service API surface; some re-exports are consumed only as features land.
+#[allow(unused_imports)]
+pub use conversation::{ChatMessage, History, Role};
+#[allow(unused_imports)]
+pub use tools::{Tool, ToolCall, ToolRouter};
