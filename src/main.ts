@@ -27,6 +27,10 @@ interface ErrorPayload {
 interface ToolPayload {
   summary: string;
 }
+interface ApprovalPayload {
+  id: string;
+  command: string;
+}
 
 const stage = document.getElementById("stage") as HTMLElement;
 const sprite = document.getElementById("sprite") as HTMLImageElement;
@@ -73,6 +77,40 @@ function closeInput(): void {
   input.blur();
 }
 
+// Human-in-the-loop: show the command and resolve on Y/N.
+let approvalActive = false;
+function requestApproval(req: ApprovalPayload): void {
+  if (approvalActive) return; // one at a time
+  approvalActive = true;
+  character.set("alert");
+  if (toastTimer !== undefined) clearTimeout(toastTimer);
+  toast.textContent = `Permitir?  ${req.command}   [Y / N]`;
+  toast.classList.add("show", "approve");
+
+  const finish = async (approved: boolean) => {
+    document.removeEventListener("keydown", onKey, true);
+    approvalActive = false;
+    toast.classList.remove("show", "approve");
+    try {
+      await invoke("approve_action", { id: req.id, approved });
+    } catch (err) {
+      console.error("approve_action failed", err);
+    }
+  };
+
+  const onKey = (ev: KeyboardEvent) => {
+    const k = ev.key.toLowerCase();
+    if (k === "y" || k === "enter") {
+      ev.preventDefault();
+      void finish(true);
+    } else if (k === "n" || k === "escape") {
+      ev.preventDefault();
+      void finish(false);
+    }
+  };
+  document.addEventListener("keydown", onKey, true);
+}
+
 function showAlert(): void {
   character.set("alert");
   if (alertTimer !== undefined) clearTimeout(alertTimer);
@@ -85,6 +123,11 @@ function showAlert(): void {
 async function bootstrap(): Promise<void> {
   // Global hotkey (Ctrl+Shift+K) routed from the Rust backend.
   await listen("ui://focus-input", () => openInput());
+
+  // Dangerous shell command awaiting human approval.
+  await listen<ApprovalPayload>("ui://require-approval", (e) => {
+    requestApproval(e.payload);
+  });
 
   // Backend actor is the source of truth for idle/thinking/speaking.
   await listen<StatePayload>("character://state", (e) => {

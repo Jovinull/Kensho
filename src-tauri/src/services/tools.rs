@@ -27,6 +27,7 @@ use chrono::{NaiveDate, TimeZone, Utc};
 use crate::core::{AppError, AppResult};
 use crate::domain::{DelegatedTask, Task};
 use crate::infrastructure::{Database, Notifier};
+use crate::services::approval::ApprovalGate;
 
 /// Hardcoded dev team valid as delegation targets (MVP).
 pub const TEAM: [&str; 3] = ["Waldston", "Joãozinho", "Rafaela"];
@@ -35,6 +36,14 @@ pub const TEAM: [&str; 3] = ["Waldston", "Joãozinho", "Rafaela"];
 const FILE_EDGE_LINES: usize = 100;
 /// Hard cap on bytes read from a file.
 const FILE_MAX_BYTES: u64 = 1_000_000;
+
+/// Command prefixes considered read-only/safe (run without approval).
+const SAFE_PREFIXES: [&str; 14] = [
+    "ls", "cat", "echo", "pwd", "whoami", "head", "tail", "grep", "find", "wc",
+    "date", "git status", "git log", "git diff",
+];
+/// Shell metacharacters that force approval even with a safe prefix.
+const DANGEROUS_CHARS: [char; 8] = [';', '&', '|', '>', '<', '`', '\n', '$'];
 
 /// Result of executing a tool.
 #[derive(Debug, Clone)]
@@ -70,10 +79,11 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    /// Parse the captured body, e.g. `ADD_TASK>Comprar pão|2026-06-20`.
-    /// The command name is everything up to the first `>`.
+    /// Parse the captured body, e.g. `ADD_TASK>Comprar pão|2026-06-20` or the
+    /// fuzzy bracket form `ADD_TASK]Comprar pão`. The command name is everything
+    /// up to the first `>` or `]` separator.
     pub fn parse(body: &str) -> Self {
-        match body.find('>') {
+        match body.find(['>', ']']) {
             Some(idx) => ToolCall {
                 name: body[..idx].trim().to_uppercase(),
                 raw_args: body[idx + 1..].to_string(),
@@ -115,8 +125,9 @@ impl ToolRouter {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
-    /// Build the default router with all built-in capabilities.
-    pub fn with_defaults(db: Database, notifier: Notifier) -> Self {
+    /// Build the default router with all built-in capabilities. `gate` mediates
+    /// approval of dangerous shell commands.
+    pub fn with_defaults(db: Database, notifier: Notifier, gate: Arc<dyn ApprovalGate>) -> Self {
         let mut router = Self::new();
 
         // Shared HTTP client for outbound webhooks (5s timeout, rustls).
@@ -139,7 +150,8 @@ impl ToolRouter {
             webhook_url,
         }));
         router.register(Arc::new(ReadLocalFileTool));
-        router.register(Arc::new(ShellCommandTool));
+        router.register(Arc::new(ShellCommandTool { gate }));
+        router.register(Arc::new(ScanProjectTool));
         router
     }
 
@@ -290,11 +302,26 @@ impl Tool for DelegateTaskTool {
 }
 
 /// Run a shell command (`sh -c`) with a strict timeout, returning truncated
-/// stdout/stderr as follow-up context for the model to analyze.
-struct ShellCommandTool;
+/// stdout/stderr as follow-up context for the model to analyze. Mutating
+/// commands (anything not in `SAFE_PREFIXES`) require human approval first.
+struct ShellCommandTool {
+    gate: Arc<dyn ApprovalGate>,
+}
 
 const SHELL_TIMEOUT_SECS: u64 = 5;
 const SHELL_OUTPUT_MAX_CHARS: usize = 2000;
+
+/// Read-only/safe iff it starts with a safe prefix AND has no shell metachars
+/// (so `ls; rm -rf` is NOT considered safe).
+fn is_safe_command(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.contains(DANGEROUS_CHARS) {
+        return false;
+    }
+    SAFE_PREFIXES.iter().any(|p| {
+        cmd == *p || cmd.starts_with(&format!("{p} ")) || cmd.starts_with(&format!("{p}\t"))
+    })
+}
 
 #[async_trait]
 impl Tool for ShellCommandTool {
@@ -306,6 +333,15 @@ impl Tool for ShellCommandTool {
         let cmd = raw_args.trim().to_string();
         if cmd.is_empty() {
             return Ok(ToolOutcome::summary("Comando vazio — ignorado."));
+        }
+
+        // Human-in-the-loop: dangerous commands need explicit approval.
+        if !is_safe_command(&cmd) && !self.gate.request(&cmd).await {
+            tracing::info!(%cmd, "shell command denied by user");
+            return Ok(ToolOutcome::with_follow_up(
+                "Execução negada",
+                format!("Usuário negou a execução do comando: `{cmd}`."),
+            ));
         }
 
         // `kill_on_drop` ensures the child dies if the timeout drops the future.
@@ -382,6 +418,53 @@ impl Tool for ReadLocalFileTool {
     }
 }
 
+/// Scan a directory, summarize each text file (RAG-lite), and inject a condensed
+/// digest — for digesting dense docs (e.g. paper drafts) that exceed the 2048
+/// context window. Summarization is rule-based per file type (headers, function
+/// signatures, abstracts) so nothing pollutes the model's stack with raw bulk.
+struct ScanProjectTool;
+
+const SCAN_MAX_FILES: usize = 40;
+const SCAN_MAX_DEPTH: usize = 3;
+const SCAN_DIGEST_MAX_CHARS: usize = 6000;
+const SCAN_PER_FILE_MAX_CHARS: usize = 600;
+const SCAN_EXTS: [&str; 7] = ["md", "markdown", "tex", "txt", "rs", "toml", "py"];
+
+#[async_trait]
+impl Tool for ScanProjectTool {
+    fn name(&self) -> &str {
+        "SCAN_DIR"
+    }
+
+    async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
+        let dir = raw_args.trim().to_string();
+        if dir.is_empty() {
+            return Ok(ToolOutcome::summary("Diretório vazio — ignorado."));
+        }
+
+        let dir_for_scan = dir.clone();
+        let (digest, count) = tokio::task::spawn_blocking(move || scan_dir(&dir_for_scan))
+            .await
+            .map_err(join_err)??;
+
+        if count == 0 {
+            return Ok(ToolOutcome::summary(format!(
+                "Nenhum arquivo de texto encontrado em {dir}."
+            )));
+        }
+
+        let injected = format!(
+            "Resumo condensado de {count} arquivo(s) em `{dir}` (cabeçalhos, \
+             assinaturas e seções):\n```\n{digest}\n```\n\
+             Use este panorama para responder à solicitação do usuário.",
+        );
+        Ok(ToolOutcome::with_follow_up(
+            format!("Varrendo {dir} ({count} arquivos)"),
+            injected,
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -399,6 +482,165 @@ fn tail_chars(s: &str, max: usize) -> String {
         let tail: String = s.chars().skip(count - max).collect();
         format!("…{tail}")
     }
+}
+
+/// Keep only the first `max` characters (char-safe), appending `…` when cut.
+fn head_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}…")
+    }
+}
+
+/// Recursively collect text files (depth/file capped, skipping hidden + heavy dirs).
+fn collect_files(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    if depth > SCAN_MAX_DEPTH || out.len() >= SCAN_MAX_FILES {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if out.len() >= SCAN_MAX_FILES {
+            break;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                if name.starts_with('.') || name == "target" || name == "node_modules" {
+                    continue;
+                }
+            }
+            collect_files(&path, depth + 1, out);
+        } else if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                if SCAN_EXTS.contains(&ext.to_lowercase().as_str()) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+}
+
+/// Rule-based per-file summary: pull structural lines, not raw bulk.
+fn summarize_file(ext: &str, content: &str) -> String {
+    let mut picked: Vec<&str> = Vec::new();
+    match ext {
+        "md" | "markdown" => {
+            for l in content.lines() {
+                if l.trim_start().starts_with('#') {
+                    picked.push(l.trim_end());
+                }
+            }
+            if let Some(first) = content
+                .lines()
+                .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+            {
+                picked.push(first.trim_end());
+            }
+        }
+        "tex" => {
+            for l in content.lines() {
+                let t = l.trim_start();
+                if t.starts_with("\\section")
+                    || t.starts_with("\\subsection")
+                    || t.starts_with("\\chapter")
+                    || t.starts_with("\\title")
+                    || t.starts_with("\\paragraph")
+                    || t.contains("\\begin{abstract}")
+                {
+                    picked.push(l.trim_end());
+                }
+            }
+        }
+        "rs" => {
+            for l in content.lines() {
+                let t = l.trim_start();
+                if t.starts_with("pub fn ")
+                    || t.starts_with("fn ")
+                    || t.starts_with("pub struct ")
+                    || t.starts_with("struct ")
+                    || t.starts_with("pub enum ")
+                    || t.starts_with("enum ")
+                    || t.starts_with("pub trait ")
+                    || t.starts_with("trait ")
+                    || t.starts_with("impl ")
+                {
+                    picked.push(l.trim_end());
+                }
+            }
+        }
+        "py" => {
+            for l in content.lines() {
+                let t = l.trim_start();
+                if t.starts_with("def ") || t.starts_with("class ") {
+                    picked.push(l.trim_end());
+                }
+            }
+        }
+        "toml" => {
+            for l in content.lines() {
+                if l.trim_start().starts_with('[') {
+                    picked.push(l.trim());
+                }
+            }
+        }
+        _ => {
+            for l in content.lines().take(10) {
+                picked.push(l.trim_end());
+            }
+        }
+    }
+
+    if picked.is_empty() {
+        for l in content.lines().filter(|l| !l.trim().is_empty()).take(5) {
+            picked.push(l.trim_end());
+        }
+    }
+
+    head_chars(&picked.join("\n"), SCAN_PER_FILE_MAX_CHARS)
+}
+
+/// Walk `dir`, summarize each text file, and concatenate a bounded digest.
+fn scan_dir(dir: &str) -> AppResult<(String, usize)> {
+    let base = std::path::Path::new(dir);
+    if !base.is_dir() {
+        return Err(AppError::Other(anyhow::anyhow!(
+            "{dir} não é um diretório"
+        )));
+    }
+
+    let mut files = Vec::new();
+    collect_files(base, 0, &mut files);
+    files.sort();
+
+    let mut digest = String::new();
+    let mut count = 0usize;
+    for path in &files {
+        if digest.chars().count() >= SCAN_DIGEST_MAX_CHARS {
+            break;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let content = String::from_utf8_lossy(&bytes);
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let summary = summarize_file(&ext, &content);
+        if summary.trim().is_empty() {
+            continue;
+        }
+        let rel = path.strip_prefix(base).unwrap_or(path);
+        digest.push_str(&format!("## {}\n{}\n\n", rel.display(), summary));
+        count += 1;
+    }
+
+    Ok((head_chars(&digest, SCAN_DIGEST_MAX_CHARS), count))
 }
 
 async fn notify(notifier: &Notifier, body: String) {
@@ -440,6 +682,11 @@ fn read_clamped(path: &str) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::approval::{AlwaysApprove, AlwaysDeny};
+
+    fn approve() -> Arc<dyn ApprovalGate> {
+        Arc::new(AlwaysApprove)
+    }
 
     #[test]
     fn parses_command_and_args() {
@@ -451,7 +698,7 @@ mod tests {
     #[tokio::test]
     async fn router_dispatches_add_task() {
         let db = Database::open_in_memory().expect("db");
-        let router = ToolRouter::with_defaults(db.clone(), Notifier::default());
+        let router = ToolRouter::with_defaults(db.clone(), Notifier::default(), approve());
         let out = router
             .dispatch(ToolCall::parse("ADD_TASK>Comprar pão|2026-06-20"))
             .await
@@ -463,7 +710,7 @@ mod tests {
     #[tokio::test]
     async fn delegate_accepts_known_member_case_insensitive() {
         let db = Database::open_in_memory().expect("db");
-        let router = ToolRouter::with_defaults(db.clone(), Notifier::default());
+        let router = ToolRouter::with_defaults(db.clone(), Notifier::default(), approve());
         let out = router
             .dispatch(ToolCall::parse("DELEGATE>rafaela|Corrigir bug no login"))
             .await
@@ -475,7 +722,7 @@ mod tests {
     #[tokio::test]
     async fn delegate_rejects_unknown_assignee() {
         let db = Database::open_in_memory().expect("db");
-        let router = ToolRouter::with_defaults(db.clone(), Notifier::default());
+        let router = ToolRouter::with_defaults(db.clone(), Notifier::default(), approve());
         let out = router
             .dispatch(ToolCall::parse("DELEGATE>Fulano|qualquer coisa"))
             .await
@@ -487,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn read_file_injects_follow_up_context() {
         let db = Database::open_in_memory().expect("db");
-        let router = ToolRouter::with_defaults(db, Notifier::default());
+        let router = ToolRouter::with_defaults(db, Notifier::default(), approve());
 
         let path = std::env::temp_dir().join("kensho_read_test.txt");
         std::fs::write(&path, "linha1\nERRO: panic\nlinha3").expect("write");
@@ -505,7 +752,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_command_is_non_fatal() {
         let db = Database::open_in_memory().expect("db");
-        let router = ToolRouter::with_defaults(db, Notifier::default());
+        let router = ToolRouter::with_defaults(db, Notifier::default(), approve());
         let out = router.dispatch(ToolCall::parse("NOPE>x")).await.expect("ok");
         assert!(out.summary.contains("desconhecido"));
     }
@@ -513,7 +760,7 @@ mod tests {
     #[tokio::test]
     async fn shell_runs_harmless_command() {
         let db = Database::open_in_memory().expect("db");
-        let router = ToolRouter::with_defaults(db, Notifier::default());
+        let router = ToolRouter::with_defaults(db, Notifier::default(), approve());
         let out = router
             .dispatch(ToolCall::parse("CMD>echo kensho-test"))
             .await
@@ -537,5 +784,89 @@ mod tests {
         assert!(out.summary.contains("Rafaela"));
         assert!(out.summary.contains("rede")); // network-failure note
         assert_eq!(db.count_delegated_tasks().expect("count"), 1); // persisted anyway
+    }
+
+    // --- Human-in-the-loop ---------------------------------------------------
+
+    #[test]
+    fn safe_command_classification() {
+        assert!(is_safe_command("ls -la"));
+        assert!(is_safe_command("git status -s"));
+        assert!(is_safe_command("echo hi"));
+        assert!(!is_safe_command("rm -rf /tmp/x"));
+        assert!(!is_safe_command("git commit -m wip"));
+        assert!(!is_safe_command("ls; rm -rf /")); // metachar defeats prefix
+        assert!(!is_safe_command("cat a > b")); // redirection
+    }
+
+    #[tokio::test]
+    async fn shell_safe_command_skips_gate_even_when_denied() {
+        let db = Database::open_in_memory().expect("db");
+        // Deny gate, but `echo` is safe → never asks, runs anyway.
+        let router = ToolRouter::with_defaults(db, Notifier::default(), Arc::new(AlwaysDeny));
+        let out = router
+            .dispatch(ToolCall::parse("CMD>echo safe-path"))
+            .await
+            .expect("dispatch");
+        assert!(out.follow_up.expect("output").contains("safe-path"));
+    }
+
+    #[tokio::test]
+    async fn shell_unsafe_command_denied_returns_refusal() {
+        let db = Database::open_in_memory().expect("db");
+        let router = ToolRouter::with_defaults(db, Notifier::default(), Arc::new(AlwaysDeny));
+        let out = router
+            .dispatch(ToolCall::parse("CMD>rm -rf /tmp/should-not-run"))
+            .await
+            .expect("dispatch");
+        assert_eq!(out.summary, "Execução negada");
+        assert!(out.follow_up.expect("ctx").contains("negou"));
+    }
+
+    #[tokio::test]
+    async fn shell_unsafe_command_approved_then_runs() {
+        let db = Database::open_in_memory().expect("db");
+        // `printf` is not in the safe list → needs approval → approved → runs.
+        let router = ToolRouter::with_defaults(db, Notifier::default(), approve());
+        let out = router
+            .dispatch(ToolCall::parse("CMD>printf approved-run"))
+            .await
+            .expect("dispatch");
+        assert!(out.follow_up.expect("output").contains("approved-run"));
+    }
+
+    // --- Workspace scanner ---------------------------------------------------
+
+    #[tokio::test]
+    async fn scan_summarizes_structure_not_bulk() {
+        let dir = std::env::temp_dir().join("kensho_scan_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("doc.md"),
+            "# Título Principal\nlinha de corpo qualquer\n## Seção A\nmais texto",
+        )
+        .expect("md");
+        std::fs::write(
+            dir.join("code.rs"),
+            "fn main() {}\nlet ruido = 5; // nao e assinatura\npub struct Foo { a: i32 }",
+        )
+        .expect("rs");
+
+        let db = Database::open_in_memory().expect("db");
+        let router = ToolRouter::with_defaults(db, Notifier::default(), approve());
+        let out = router
+            .dispatch(ToolCall::parse(&format!("SCAN_DIR>{}", dir.display())))
+            .await
+            .expect("dispatch");
+
+        assert!(out.summary.contains("Varrendo"));
+        let digest = out.follow_up.expect("digest");
+        assert!(digest.contains("# Título Principal"));
+        assert!(digest.contains("## Seção A"));
+        assert!(digest.contains("fn main"));
+        assert!(digest.contains("struct Foo"));
+        // Non-structural code line must be filtered out.
+        assert!(!digest.contains("nao e assinatura"));
     }
 }

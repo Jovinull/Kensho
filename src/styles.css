@@ -86,6 +86,12 @@ body {
   opacity: 1;
   transform: translateY(0);
 }
+/* Approval prompt variant (amber, awaiting Y/N). */
+.toast.approve {
+  color: #fff6e6;
+  background: rgba(40, 32, 16, 0.9);
+  border-color: rgba(255, 176, 32, 0.7);
+}
 
 .bubble {
   max-width: 280px;

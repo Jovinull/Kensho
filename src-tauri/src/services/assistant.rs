@@ -59,7 +59,12 @@ impl AssistantService {
              \
              4) Executar um comando de terminal e analisar a saída: \
              <CALL:CMD>git status</CALL> \
-             (use só comandos não-interativos e rápidos; a saída voltará para você).",
+             (use só comandos não-interativos e rápidos; a saída voltará para você; \
+             comandos que alteram o sistema exigem aprovação do usuário). \
+             \
+             5) Varrer e resumir um diretório inteiro (docs, código, rascunhos): \
+             <CALL:SCAN_DIR>/caminho/do/diretorio</CALL> \
+             (retorna um resumo condensado de vários arquivos para você analisar).",
             name = self.profile.display_name,
             persona = self.profile.persona,
             locale = self.profile.locale,

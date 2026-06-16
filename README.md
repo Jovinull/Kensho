@@ -101,7 +101,14 @@ The single integration TODO (the decode loop) is marked in
   <CALL:DELEGATE>Rafaela|Corrigir bug no login</CALL>  # ticket → team member
   <CALL:READ_FILE>/var/log/app/error.log</CALL>        # read + analyze a file
   <CALL:CMD>git status</CALL>                          # run a shell command
+  <CALL:SCAN_DIR>/home/me/paper-draft</CALL>           # summarize a whole dir
   ```
+
+  Robustness: a **fuzzy parser** (`actor/stream_filter.rs`) also accepts drifted
+  syntax small models emit — `[CALL: ADD_TASK]…[/CALL]`, `<call:add_task>…`,
+  case/space variants. Optionally, set `KENSHO_GRAMMAR=1` to enable a **lazy GBNF
+  grammar** (`grammar_lazy`) that hard-constrains tag structure once `<CALL:`
+  appears, leaving free text unconstrained.
 
   - `DELEGATE` validates the assignee against the dev team
     (`Waldston`, `Joãozinho`, `Rafaela`), stores an agile-issue payload in the
@@ -111,7 +118,14 @@ The single integration TODO (the decode loop) is marked in
   - `READ_FILE` reads a clamped slice (first/last 100 lines, ≤1 MB) and injects
     it back into the rolling window, triggering a follow-up generation.
   - `CMD` runs `sh -c <cmd>` with a strict 5s timeout (`kill_on_drop`), truncates
-    output to the last 2000 chars, and injects it back for analysis.
+    output to the last 2000 chars, and injects it back for analysis. **Mutating
+    commands** (anything outside a safe-prefix allowlist, or containing shell
+    metacharacters) trigger **human-in-the-loop approval**: the backend emits
+    `ui://require-approval`, suspends the tool on a oneshot channel, and waits for
+    `approve_action` (`[Y/N]` in the UI; 60s → auto-deny).
+  - `SCAN_DIR` walks a directory (depth/file-capped), summarizes each text file
+    rule-based (Markdown headers, Rust/Python signatures, TeX sections), and
+    injects a bounded digest — RAG-lite for docs that exceed the context window.
 
 ## Proactivity (heartbeat)
 

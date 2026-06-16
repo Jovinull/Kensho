@@ -26,6 +26,14 @@ use llama_cpp_2::sampling::LlamaSampler;
 use super::engine::{InferenceEngine, LlmError, TokenSink};
 use crate::core::SystemConfig;
 
+/// GBNF for the tool-call body that follows the `<CALL:` trigger. Forces a
+/// structurally valid `NAME>args</CALL>` once the model decides to open a call.
+const CALL_GRAMMAR: &str = r#"
+root ::= name ">" body "</CALL>"
+name ::= [A-Za-z_]+
+body ::= [^<]*
+"#;
+
 pub struct LlamaEngine {
     backend: Arc<LlamaBackend>,
     model: Arc<LlamaModel>,
@@ -152,13 +160,29 @@ fn decode_loop(
     // Anti-loop sampler chain: a moderate repetition penalty stops runaway
     // repeats without breaking pt-BR, balanced temperature for an assistant.
     //   penalties(last_n, repeat=1.12, freq=0.0, present=0.0)
-    let mut sampler = LlamaSampler::chain_simple([
-        LlamaSampler::penalties(64, 1.12, 0.0, 0.0),
-        LlamaSampler::top_k(40),
-        LlamaSampler::top_p(0.9, 1),
-        LlamaSampler::temp(0.7),
-        LlamaSampler::dist(seed),
-    ]);
+    let mut samplers = Vec::new();
+
+    // Optional GBNF grammar (opt-in via KENSHO_GRAMMAR): a *lazy* grammar that
+    // only kicks in once the model emits the `<CALL:` trigger, forcing the rest
+    // of the tag to be structurally valid while leaving free text unconstrained.
+    // Off by default; the deterministic fuzzy parser in stream_filter.rs is the
+    // always-on safety net.
+    if std::env::var_os("KENSHO_GRAMMAR").is_some() {
+        match LlamaSampler::grammar_lazy(model, CALL_GRAMMAR, "root", ["<CALL:"], &[]) {
+            Ok(g) => {
+                tracing::info!("GBNF lazy grammar enabled for tool calls");
+                samplers.push(g);
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to build grammar; skipping"),
+        }
+    }
+
+    samplers.push(LlamaSampler::penalties(64, 1.12, 0.0, 0.0));
+    samplers.push(LlamaSampler::top_k(40));
+    samplers.push(LlamaSampler::top_p(0.9, 1));
+    samplers.push(LlamaSampler::temp(0.7));
+    samplers.push(LlamaSampler::dist(seed));
+    let mut sampler = LlamaSampler::chain_simple(samplers);
 
     // Explicit stop sequence: halt as soon as the model emits `<|im_end|>`.
     // Resolved to its token id when the tokenizer maps it to a single special

@@ -21,9 +21,13 @@ mod tauri_commands;
 
 use tauri::{Emitter, Manager};
 
+use std::sync::Arc;
+
 use crate::core::SystemConfig;
 use crate::infrastructure::{llm, Database, Notifier};
+use crate::services::approval::PendingApprovals;
 use crate::services::{AssistantService, ToolRouter};
+use crate::tauri_commands::TauriApprovalGate;
 
 /// Build and run the Tauri application.
 pub fn run() {
@@ -47,7 +51,10 @@ pub fn run() {
 
             // Adapters + extensible tool router (DB writes + native notifications).
             let notifier = Notifier::default();
-            let router = ToolRouter::with_defaults(db.clone(), notifier.clone());
+            // Human-in-the-loop approval for dangerous shell commands.
+            let pending = PendingApprovals::new();
+            let gate = Arc::new(TauriApprovalGate::new(handle.clone(), pending.clone()));
+            let router = ToolRouter::with_defaults(db.clone(), notifier.clone(), gate);
 
             // System-prompt composer (live DB context + tool protocol).
             let assistant = AssistantService::new(db.clone());
@@ -97,6 +104,7 @@ pub fn run() {
             app.manage(db);
             app.manage(llm_handle);
             app.manage(notifier);
+            app.manage(pending);
 
             Ok(())
         })
@@ -107,6 +115,7 @@ pub fn run() {
             tauri_commands::send_notification,
             tauri_commands::set_always_on_top,
             tauri_commands::app_info,
+            tauri_commands::approve_action,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Kensho application");

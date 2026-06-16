@@ -4,13 +4,17 @@
 //! Anything potentially blocking (DB, inference) is pushed to the actor or a
 //! blocking thread so the UI never stalls.
 
+use std::time::Duration;
+
+use async_trait::async_trait;
 use serde::Serialize;
-use tauri::{State, Window};
+use tauri::{AppHandle, Emitter, State, Window};
 
 use crate::actor::LlmHandle;
 use crate::core::CommandError;
 use crate::domain::Task;
 use crate::infrastructure::{Database, Notifier};
+use crate::services::approval::{ApprovalGate, PendingApprovals};
 
 /// Forward raw user input to the LLM actor. Returns immediately; the actor wraps
 /// it in ChatML + rolling history and streams the answer back via the
@@ -90,4 +94,61 @@ fn join_err<E: std::fmt::Display>(e: E) -> CommandError {
         message: e.to_string(),
         kind: "join".to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Human-in-the-loop approval (production gate + resolver command)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone)]
+struct ApprovalRequest {
+    id: String,
+    command: String,
+}
+
+/// Production [`ApprovalGate`]: emits `ui://require-approval` and suspends the
+/// tool until the frontend answers via `approve_action` (60s → auto-deny).
+pub struct TauriApprovalGate {
+    app: AppHandle,
+    pending: PendingApprovals,
+}
+
+impl TauriApprovalGate {
+    pub fn new(app: AppHandle, pending: PendingApprovals) -> Self {
+        Self { app, pending }
+    }
+}
+
+#[async_trait]
+impl ApprovalGate for TauriApprovalGate {
+    async fn request(&self, command: &str) -> bool {
+        let id = uuid::Uuid::new_v4().to_string();
+        let rx = self.pending.register(id.clone());
+        let _ = self.app.emit(
+            "ui://require-approval",
+            ApprovalRequest {
+                id: id.clone(),
+                command: command.to_string(),
+            },
+        );
+        match tokio::time::timeout(Duration::from_secs(60), rx).await {
+            Ok(Ok(approved)) => approved,
+            _ => {
+                // Timeout or dropped channel → deny and clean up.
+                self.pending.resolve(&id, false);
+                false
+            }
+        }
+    }
+}
+
+/// Frontend's answer to a pending `ui://require-approval` request.
+#[tauri::command]
+pub fn approve_action(
+    id: String,
+    approved: bool,
+    pending: State<'_, PendingApprovals>,
+) -> Result<(), CommandError> {
+    pending.resolve(&id, approved);
+    Ok(())
 }
