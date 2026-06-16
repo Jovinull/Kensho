@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::core::SystemConfig;
 use crate::infrastructure::{llm, Database, Notifier};
 use crate::services::approval::PendingApprovals;
+use crate::services::clipboard::{self, ClipboardContext};
 use crate::services::{AssistantService, ToolRouter};
 use crate::tauri_commands::TauriApprovalGate;
 
@@ -56,8 +57,11 @@ pub fn run() {
             let gate = Arc::new(TauriApprovalGate::new(handle.clone(), pending.clone()));
             let router = ToolRouter::with_defaults(db.clone(), notifier.clone(), gate);
 
-            // System-prompt composer (live DB context + tool protocol).
-            let assistant = AssistantService::new(db.clone());
+            // Clipboard context: snapshotted on hotkey, consumed by next prompt.
+            let clipboard = ClipboardContext::new();
+
+            // System-prompt composer (live DB context + clipboard + tool protocol).
+            let assistant = AssistantService::new(db.clone(), clipboard.clone());
 
             // Local inference engine (mock by default; gguf with --features llama)
             // owned exclusively by the actor task, which also owns the rolling
@@ -83,11 +87,14 @@ pub fn run() {
                     Builder as ShortcutBuilder, Code, Modifiers, Shortcut, ShortcutState,
                 };
                 let toggle = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyK);
+                let clipboard_hotkey = clipboard.clone();
                 app.handle().plugin(
                     ShortcutBuilder::new()
                         .with_shortcut(toggle)?
                         .with_handler(move |app, _shortcut, event| {
                             if event.state == ShortcutState::Pressed {
+                                // Snapshot the clipboard so this turn's prompt has it.
+                                clipboard_hotkey.set(clipboard::read_system_clipboard());
                                 if let Some(win) = app.get_webview_window("main") {
                                     let _ = win.show();
                                     let _ = win.set_focus();

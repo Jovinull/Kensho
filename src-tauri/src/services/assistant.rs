@@ -7,18 +7,21 @@ use chrono::{Duration, Timelike, Utc};
 use crate::core::AppResult;
 use crate::domain::{Task, UserProfile};
 use crate::infrastructure::Database;
+use crate::services::clipboard::ClipboardContext;
 
 #[derive(Clone)]
 pub struct AssistantService {
     db: Database,
     profile: UserProfile,
+    clipboard: ClipboardContext,
 }
 
 impl AssistantService {
-    pub fn new(db: Database) -> Self {
+    pub fn new(db: Database, clipboard: ClipboardContext) -> Self {
         Self {
             db,
             profile: UserProfile::default(),
+            clipboard,
         }
     }
 
@@ -36,11 +39,25 @@ impl AssistantService {
 
         let context = Self::render_context(&tasks, &events);
 
+        // Consume the pending clipboard snapshot (set on hotkey invocation).
+        let clipboard_block = match self.clipboard.take() {
+            Some(clip) if !clip.trim().is_empty() => format!(
+                " O usuário tem o seguinte texto na área de transferência no momento: \
+                 \"\"\"{clip}\"\"\". Use-o se a pergunta se referir a ele."
+            ),
+            _ => String::new(),
+        };
+
         let system = format!(
             "Você é Kensho, um assistente local que roda no Ubuntu de {name}. \
              Persona: {persona}. Responda em {locale}, de forma breve, objetiva e útil. \
-             {context} \
+             {context}{clipboard_block} \
              Leve essas informações em conta ao responder, mas só as mencione se forem relevantes. \
+             \
+             MEMÓRIA: você possui um cérebro permanente (busca full-text). Use \
+             <CALL:MEMORIZE>Título|Conteúdo</CALL> para guardar fatos/resumos para sempre, e \
+             <CALL:RECALL>palavras-chave</CALL> para consultar antes de dizer que não sabe \
+             algo sobre fatos passados, papers, teses ou decisões anteriores. \
              \
              FERRAMENTAS: você pode agir no sistema. Imprima a tag EXATAMENTE, \
              sem aspas e sem explicar a sintaxe, e depois confirme em linguagem \
@@ -69,6 +86,7 @@ impl AssistantService {
             persona = self.profile.persona,
             locale = self.profile.locale,
             context = context,
+            clipboard_block = clipboard_block,
         );
 
         Ok(system)
@@ -165,9 +183,25 @@ mod tests {
         task.due_at = Some(Utc::now());
         db.insert_task(&task).expect("insert");
 
-        let svc = AssistantService::new(db);
+        let svc = AssistantService::new(db, ClipboardContext::new());
         let due = svc.pending_due_today().expect("query");
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].title, "Entregar relatório");
+    }
+
+    #[test]
+    fn clipboard_snapshot_injected_once() {
+        let db = Database::open_in_memory().expect("db");
+        let clip = ClipboardContext::new();
+        clip.set(Some("error[E0382]: borrow of moved value".to_string()));
+        let svc = AssistantService::new(db, clip);
+
+        let first = svc.system_prompt().expect("prompt");
+        assert!(first.contains("área de transferência"));
+        assert!(first.contains("E0382"));
+
+        // Snapshot is one-shot: the next turn no longer carries it.
+        let second = svc.system_prompt().expect("prompt");
+        assert!(!second.contains("E0382"));
     }
 }

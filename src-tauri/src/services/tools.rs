@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, TimeZone, Utc};
 
 use crate::core::{AppError, AppResult};
-use crate::domain::{DelegatedTask, Task};
+use crate::domain::{DelegatedTask, KnowledgeNote, Task};
 use crate::infrastructure::{Database, Notifier};
 use crate::services::approval::ApprovalGate;
 
@@ -144,11 +144,13 @@ impl ToolRouter {
             notifier: notifier.clone(),
         }));
         router.register(Arc::new(DelegateTaskTool {
-            db,
+            db: db.clone(),
             notifier,
             http,
             webhook_url,
         }));
+        router.register(Arc::new(MemorizeTool { db: db.clone() }));
+        router.register(Arc::new(RecallTool { db }));
         router.register(Arc::new(ReadLocalFileTool));
         router.register(Arc::new(ShellCommandTool { gate }));
         router.register(Arc::new(ScanProjectTool));
@@ -460,6 +462,92 @@ impl Tool for ScanProjectTool {
         );
         Ok(ToolOutcome::with_follow_up(
             format!("Varrendo {dir} ({count} arquivos)"),
+            injected,
+        ))
+    }
+}
+
+/// Permanently store a note in the FTS5 long-term memory.
+struct MemorizeTool {
+    db: Database,
+}
+
+#[async_trait]
+impl Tool for MemorizeTool {
+    fn name(&self) -> &str {
+        "MEMORIZE"
+    }
+
+    async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
+        // `Título|Conteúdo|tags-opcionais`
+        let mut parts = raw_args.splitn(3, '|');
+        let title = parts.next().unwrap_or("").trim().to_string();
+        let content = parts.next().unwrap_or("").trim().to_string();
+        let tags = parts.next().unwrap_or("").trim().to_string();
+
+        if title.is_empty() || content.is_empty() {
+            return Ok(ToolOutcome::summary(
+                "Memória inválida (faltou título ou conteúdo).",
+            ));
+        }
+
+        let note = KnowledgeNote::new(title.clone(), content, tags);
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || db.insert_knowledge(&note))
+            .await
+            .map_err(join_err)??;
+
+        Ok(ToolOutcome::summary(format!("Memorizado: {title}")))
+    }
+}
+
+/// Recall notes from long-term memory and inject them into the conversation.
+struct RecallTool {
+    db: Database,
+}
+
+#[async_trait]
+impl Tool for RecallTool {
+    fn name(&self) -> &str {
+        "RECALL"
+    }
+
+    async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
+        let query = raw_args.trim().to_string();
+        if query.is_empty() {
+            return Ok(ToolOutcome::summary("Busca de memória vazia — ignorada."));
+        }
+
+        let db = self.db.clone();
+        let q = query.clone();
+        let hits = tokio::task::spawn_blocking(move || db.search_knowledge(&q, 5))
+            .await
+            .map_err(join_err)??;
+
+        if hits.is_empty() {
+            return Ok(ToolOutcome::summary(format!(
+                "Nada encontrado na memória sobre: {query}"
+            )));
+        }
+
+        let mut digest = String::new();
+        for note in &hits {
+            digest.push_str(&format!("### {}", note.title));
+            if !note.tags.is_empty() {
+                digest.push_str(&format!(" [{}]", note.tags));
+            }
+            digest.push('\n');
+            digest.push_str(&note.content);
+            digest.push_str("\n\n");
+        }
+
+        let injected = format!(
+            "Da sua memória permanente sobre `{query}`:\n```\n{}\n```\n\
+             Use estas anotações para responder ao usuário.",
+            digest.trim_end()
+        );
+        Ok(ToolOutcome::with_follow_up(
+            format!("Lembrando: {query}"),
             injected,
         ))
     }
@@ -833,6 +921,60 @@ mod tests {
             .await
             .expect("dispatch");
         assert!(out.follow_up.expect("output").contains("approved-run"));
+    }
+
+    // --- Long-term memory (FTS5) ---------------------------------------------
+
+    #[tokio::test]
+    async fn memorize_persists_to_fts5() {
+        let db = Database::open_in_memory().expect("db");
+        let router = ToolRouter::with_defaults(db.clone(), Notifier::default(), approve());
+        let out = router
+            .dispatch(ToolCall::parse(
+                "MEMORIZE>ST-LibrasNet|arquitetura baseada em transformers espaço-temporais|paper",
+            ))
+            .await
+            .expect("dispatch");
+        assert!(out.summary.contains("Memorizado"));
+        assert_eq!(db.count_knowledge().expect("count"), 1);
+    }
+
+    #[tokio::test]
+    async fn recall_matches_word_fragments() {
+        let db = Database::open_in_memory().expect("db");
+        let router = ToolRouter::with_defaults(db, Notifier::default(), approve());
+        router
+            .dispatch(ToolCall::parse(
+                "MEMORIZE>ST-LibrasNet|arquitetura baseada em transformers espaço-temporais",
+            ))
+            .await
+            .expect("memorize");
+
+        // Fragment of a title token.
+        let by_title = router
+            .dispatch(ToolCall::parse("RECALL>LibrasNet"))
+            .await
+            .expect("recall");
+        assert!(by_title.follow_up.expect("ctx").contains("transformers"));
+
+        // Prefix fragment of a content word ("arquit" → "arquitetura").
+        let by_fragment = router
+            .dispatch(ToolCall::parse("RECALL>arquit"))
+            .await
+            .expect("recall");
+        assert!(by_fragment.follow_up.expect("ctx").contains("transformers"));
+    }
+
+    #[tokio::test]
+    async fn recall_empty_when_no_match() {
+        let db = Database::open_in_memory().expect("db");
+        let router = ToolRouter::with_defaults(db, Notifier::default(), approve());
+        let out = router
+            .dispatch(ToolCall::parse("RECALL>inexistente"))
+            .await
+            .expect("recall");
+        assert!(out.follow_up.is_none());
+        assert!(out.summary.contains("Nada encontrado"));
     }
 
     // --- Workspace scanner ---------------------------------------------------

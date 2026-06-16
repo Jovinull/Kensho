@@ -41,6 +41,9 @@ notify-rust = "4"
 # --- Outbound HTTP (team webhooks). rustls avoids a heavy OpenSSL build dep. ---
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# --- System clipboard access (Ctrl+C context awareness) ---
+arboard = "3"
+
 # --- Structured logging ---
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -61,9 +64,9 @@ default = []
 llama = ["dep:llama-cpp-2"]
 
 [profile.release]
-# Smaller, faster binary for a long-running desktop companion.
-panic = "abort"
-codegen-units = 1
+# Maximally optimized binary for a long-running desktop companion.
+opt-level = 3
 lto = true
-opt-level = "s"
+codegen-units = 1
+panic = "abort"
 strip = true

@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::core::AppResult;
 
 /// Bump this when adding a new migration step below.
-const TARGET_VERSION: i64 = 2;
+const TARGET_VERSION: i64 = 3;
 
 /// Ordered list of migration SQL scripts. Index + 1 == version it produces.
 const MIGRATIONS: &[&str] = &[
@@ -61,6 +61,11 @@ const MIGRATIONS: &[&str] = &[
     );
 
     CREATE INDEX IF NOT EXISTS idx_delegated_assignee ON delegated_tasks (assignee);
+    "#,
+    // v3: permanent long-term memory via FTS5 full-text search.
+    r#"
+    CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_base
+        USING fts5(title, content, tags);
     "#,
 ];
 

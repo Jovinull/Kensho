@@ -102,6 +102,8 @@ The single integration TODO (the decode loop) is marked in
   <CALL:READ_FILE>/var/log/app/error.log</CALL>        # read + analyze a file
   <CALL:CMD>git status</CALL>                          # run a shell command
   <CALL:SCAN_DIR>/home/me/paper-draft</CALL>           # summarize a whole dir
+  <CALL:MEMORIZE>ST-LibrasNet|O paper foca em…</CALL>  # save to permanent memory
+  <CALL:RECALL>ST-LibrasNet arquitetura</CALL>         # full-text recall
   ```
 
   Robustness: a **fuzzy parser** (`actor/stream_filter.rs`) also accepts drifted
@@ -126,6 +128,22 @@ The single integration TODO (the decode loop) is marked in
   - `SCAN_DIR` walks a directory (depth/file-capped), summarizes each text file
     rule-based (Markdown headers, Rust/Python signatures, TeX sections), and
     injects a bounded digest — RAG-lite for docs that exceed the context window.
+  - `MEMORIZE` / `RECALL` are Kensho's **permanent brain**: a SQLite **FTS5**
+    virtual table (`knowledge_base`). `RECALL` builds a prefix-OR match query so
+    fragments (`arquit` → `arquitetura`) hit, and injects results like `READ_FILE`.
+
+## Clipboard awareness
+
+On global-hotkey invocation the backend snapshots the OS clipboard (`arboard`,
+≤2000 chars) into a one-shot context that the next turn's invisible system prompt
+consumes. Copy a stack trace, hit `Ctrl+Shift+K`, ask "what is this?" — Kensho
+already has it.
+
+## Release build
+
+`cargo tauri build` uses an aggressive `[profile.release]`: `opt-level = 3`,
+`lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true` — smallest,
+fastest binary for a long-running desktop companion.
 
 ## Proactivity (heartbeat)
 

@@ -13,7 +13,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::core::{AppError, AppResult};
-use crate::domain::{DelegatedTask, EventId, ScheduleEvent, Task, TaskPriority, TaskStatus};
+use crate::domain::{
+    DelegatedTask, EventId, KnowledgeNote, ScheduleEvent, Task, TaskPriority, TaskStatus,
+};
 
 /// Cloneable handle to the embedded SQLite database.
 #[derive(Clone)]
@@ -161,6 +163,52 @@ impl Database {
 
     // -- events --------------------------------------------------------------
 
+    // -- knowledge base (FTS5 long-term memory) ------------------------------
+
+    pub fn insert_knowledge(&self, note: &KnowledgeNote) -> AppResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO knowledge_base (title, content, tags) VALUES (?1, ?2, ?3)",
+            rusqlite::params![note.title, note.content, note.tags],
+        )?;
+        Ok(())
+    }
+
+    /// Full-text search. Each query word is turned into a prefix term and the
+    /// terms are OR-ed, so fragments like `arquit` match `arquitetura`.
+    pub fn search_knowledge(&self, query: &str, limit: i64) -> AppResult<Vec<KnowledgeNote>> {
+        let match_query = build_fts_query(query);
+        if match_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT title, content, tags FROM knowledge_base
+             WHERE knowledge_base MATCH ?1 ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![match_query, limit], |row| {
+            Ok(KnowledgeNote {
+                title: row.get(0)?,
+                content: row.get(1)?,
+                tags: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn count_knowledge(&self) -> AppResult<i64> {
+        let conn = self.lock()?;
+        let n = conn
+            .query_row("SELECT COUNT(*) FROM knowledge_base", [], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0);
+        Ok(n)
+    }
+
     // -- delegated tasks -----------------------------------------------------
 
     pub fn insert_delegated_task(&self, t: &DelegatedTask) -> AppResult<()> {
@@ -224,6 +272,17 @@ fn parse_dt_opt(s: Option<String>) -> Option<DateTime<Utc>> {
 
 fn parse_id<T: std::str::FromStr + Default>(s: String) -> T {
     s.parse().unwrap_or_default()
+}
+
+/// Turn a free-text query into a safe FTS5 prefix-OR match expression.
+/// Splits on any non-alphanumeric char, appends `*` to each term, OR-joins.
+fn build_fts_query(query: &str) -> String {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("{t}*"))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
