@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kensho</title>
+  </head>
+  <body>
+    <!-- Whole window is alpha-transparent; only the character + bubble paint. -->
+    <main id="stage" data-state="idle">
+      <section id="bubble" class="bubble" aria-live="polite"></section>
+      <div id="character" class="character" title="Kensho">
+        <div class="orb"></div>
+        <span class="label" id="state-label">idle</span>
+      </div>
+      <form id="ask-form" class="ask">
+        <input id="ask-input" type="text" placeholder="Pergunte ao Kensho…" autocomplete="off" />
+      </form>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
