@@ -139,6 +139,39 @@ On global-hotkey invocation the backend snapshots the OS clipboard (`arboard`,
 consumes. Copy a stack trace, hit `Ctrl+Shift+K`, ask "what is this?" — Kensho
 already has it.
 
+## Voice (TTS, feature = "tts")
+
+Built with `--features tts`, Kensho speaks. The actor's reader feeds visible
+text through a `SentenceBuffer` (splits on `.?!`); each complete sentence is sent
+to a dedicated worker thread that pipes it through `piper --output-raw | aplay`,
+so audio starts before generation finishes and never blocks the UI. Configure
+with `KENSHO_PIPER_BIN`, `KENSHO_PIPER_MODEL`, `KENSHO_PIPER_RATE`. Without the
+feature, the `Speaker` is a no-op.
+
+## System tray
+
+A tray icon (AppIndicator) keeps Kensho out of the dock: menu items
+"Mostrar/Ocultar Kensho", "Pausar Alertas" (toggles the heartbeat nudges), "Sair".
+Closing the window only **hides** it (`CloseRequested` → `prevent_close` + `hide`);
+the actor + heartbeat keep running. Only tray "Sair" exits.
+
+## MCP bridge
+
+`services/mcp_bridge.rs` exposes the `ToolRouter` over JSON-RPC 2.0
+(`McpRequest` / `McpResponse`): `tools/list` discovers capabilities,
+`tools/call` invokes them — routed into the same router the local LLM uses. No
+server yet (structs + adapter only), so the toolset is ready for external MCP
+clients without coupling.
+
+## Build flavors
+
+```bash
+cargo build                          # base (mock engine, no voice)
+cargo build --features llama         # real GGUF inference
+cargo build --features "tts llama"   # + local voice
+cargo tauri build                    # production bundle
+```
+
 ## Release build
 
 `cargo tauri build` uses an aggressive `[profile.release]`: `opt-level = 3`,

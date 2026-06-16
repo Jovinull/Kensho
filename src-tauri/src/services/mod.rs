@@ -5,6 +5,7 @@ pub mod approval;
 pub mod assistant;
 pub mod clipboard;
 pub mod conversation;
+pub mod mcp_bridge;
 pub mod tools;
 
 pub use assistant::AssistantService;

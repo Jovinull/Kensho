@@ -10,11 +10,15 @@
 //! syntax (`<CALL:…>`) out of the visible stream, executes the tool, fires a
 //! native notification, then lets the natural text resume.
 
+mod sentence_buffer;
 mod stream_filter;
 
+pub use sentence_buffer::SentenceBuffer;
 pub use stream_filter::StreamFilter;
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -24,7 +28,7 @@ use tokio::sync::mpsc;
 use crate::core::AppError;
 use crate::domain::TaskId;
 use crate::infrastructure::llm::InferenceEngine;
-use crate::infrastructure::Notifier;
+use crate::infrastructure::{Notifier, Speaker};
 use crate::services::{conversation, AssistantService, History, ToolCall, ToolRouter};
 
 // Event names shared with the frontend (`src/main.ts`).
@@ -101,8 +105,12 @@ pub struct ActorDeps {
     pub router: ToolRouter,
     pub assistant: AssistantService,
     pub notifier: Notifier,
+    /// Voice output sink (no-op unless built with `--features tts`).
+    pub speaker: Speaker,
     /// Proactive heartbeat interval.
     pub heartbeat: Duration,
+    /// When true, the heartbeat suppresses proactive nudges (tray "Pausar Alertas").
+    pub alerts_paused: Arc<AtomicBool>,
 }
 
 /// Spawn the persistent worker and return a handle to it.
@@ -131,6 +139,7 @@ pub fn spawn(app: AppHandle, mut engine: Box<dyn InferenceEngine>, deps: ActorDe
                                 engine.as_mut(),
                                 &deps.router,
                                 &deps.assistant,
+                                &deps.speaker,
                                 &mut history,
                                 user_input,
                             )
@@ -159,6 +168,11 @@ async fn heartbeat(
     history: &mut History,
     nudged: &mut HashSet<TaskId>,
 ) {
+    // Tray "Pausar Alertas" suppresses proactive nudges (actor keeps running).
+    if deps.alerts_paused.load(Ordering::Relaxed) {
+        return;
+    }
+
     let assistant = deps.assistant.clone();
     let due = match tokio::task::spawn_blocking(move || assistant.pending_due_today()).await {
         Ok(Ok(tasks)) => tasks,
@@ -191,7 +205,16 @@ async fn heartbeat(
 
     // Synthetic, invisible system turn → Kensho generates the reminder text.
     if let Some(prompt) = AssistantService::deadline_reminder_prompt(&fresh) {
-        run_generation(app, engine, &deps.router, &deps.assistant, history, prompt).await;
+        run_generation(
+            app,
+            engine,
+            &deps.router,
+            &deps.assistant,
+            &deps.speaker,
+            history,
+            prompt,
+        )
+        .await;
     }
 }
 
@@ -201,6 +224,7 @@ async fn run_generation(
     engine: &mut dyn InferenceEngine,
     router: &ToolRouter,
     assistant: &AssistantService,
+    speaker: &Speaker,
     history: &mut History,
     user_input: String,
 ) {
@@ -226,8 +250,10 @@ async fn run_generation(
         // context any tool wants injected back into the conversation.
         let app_reader = app.clone();
         let router_reader = router.clone();
+        let speaker_reader = speaker.clone();
         let reader = tauri::async_runtime::spawn(async move {
             let mut filter = StreamFilter::new();
+            let mut sentences = SentenceBuffer::new();
             let mut spoke = false;
             let mut follow_ups: Vec<String> = Vec::new();
 
@@ -243,7 +269,11 @@ async fn run_generation(
                         );
                         spoke = true;
                     }
-                    emit(&app_reader, EVENT_TOKEN, TokenPayload { token: text });
+                    emit(&app_reader, EVENT_TOKEN, TokenPayload { token: text.clone() });
+                    // Voice complete sentences as they form (parallel with UI).
+                    for sentence in sentences.push(&text) {
+                        speaker_reader.speak(sentence);
+                    }
                 }
 
                 for body in calls {
@@ -274,7 +304,14 @@ async fn run_generation(
             // Flush trailing visible text held back for partial-tag detection.
             let tail = filter.finish();
             if !tail.is_empty() {
-                emit(&app_reader, EVENT_TOKEN, TokenPayload { token: tail });
+                emit(&app_reader, EVENT_TOKEN, TokenPayload { token: tail.clone() });
+                for sentence in sentences.push(&tail) {
+                    speaker_reader.speak(sentence);
+                }
+            }
+            // Speak any trailing unterminated text.
+            if let Some(rest) = sentences.flush() {
+                speaker_reader.speak(rest);
             }
             (filter.visible_text().to_owned(), follow_ups)
         });

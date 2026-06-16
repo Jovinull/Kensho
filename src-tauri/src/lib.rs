@@ -21,6 +21,7 @@ mod tauri_commands;
 
 use tauri::{Emitter, Manager};
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::core::SystemConfig;
@@ -63,6 +64,15 @@ pub fn run() {
             // System-prompt composer (live DB context + clipboard + tool protocol).
             let assistant = AssistantService::new(db.clone(), clipboard.clone());
 
+            // Voice output (no-op unless built with --features tts).
+            #[cfg(feature = "tts")]
+            let speaker = infrastructure::audio::spawn(&config);
+            #[cfg(not(feature = "tts"))]
+            let speaker = infrastructure::Speaker::disabled();
+
+            // Shared flag toggled by the tray "Pausar Alertas" item.
+            let alerts_paused = Arc::new(AtomicBool::new(false));
+
             // Local inference engine (mock by default; gguf with --features llama)
             // owned exclusively by the actor task, which also owns the rolling
             // conversation history, the tool router and the proactive heartbeat.
@@ -71,7 +81,9 @@ pub fn run() {
                 router,
                 assistant,
                 notifier: notifier.clone(),
+                speaker,
                 heartbeat: std::time::Duration::from_secs(config.heartbeat_secs),
+                alerts_paused: alerts_paused.clone(),
             };
             let llm_handle = actor::spawn(handle.clone(), engine, deps);
 
@@ -107,6 +119,50 @@ pub fn run() {
                 tracing::info!("global shortcut Ctrl+Shift+K registered");
             }
 
+            // System tray (AppIndicator): keeps Kensho out of the dock.
+            #[cfg(desktop)]
+            {
+                use tauri::menu::{MenuBuilder, MenuItemBuilder};
+                use tauri::tray::TrayIconBuilder;
+
+                let show = MenuItemBuilder::with_id("show", "Mostrar/Ocultar Kensho").build(app)?;
+                let pause = MenuItemBuilder::with_id("pause", "Pausar Alertas").build(app)?;
+                let quit = MenuItemBuilder::with_id("quit", "Sair").build(app)?;
+                let menu = MenuBuilder::new(app)
+                    .item(&show)
+                    .item(&pause)
+                    .item(&quit)
+                    .build()?;
+
+                let paused_for_tray = alerts_paused.clone();
+                let mut tray = TrayIconBuilder::new()
+                    .menu(&menu)
+                    .on_menu_event(move |app, event| match event.id().as_ref() {
+                        "show" => {
+                            if let Some(win) = app.get_webview_window("main") {
+                                if win.is_visible().unwrap_or(false) {
+                                    let _ = win.hide();
+                                } else {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                            }
+                        }
+                        "pause" => {
+                            let now = !paused_for_tray.load(Ordering::Relaxed);
+                            paused_for_tray.store(now, Ordering::Relaxed);
+                            tracing::info!(paused = now, "proactive alerts toggled");
+                        }
+                        "quit" => app.exit(0),
+                        _ => {}
+                    });
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    tray = tray.icon(icon);
+                }
+                tray.build(app)?;
+                tracing::info!("system tray ready");
+            }
+
             app.manage(config);
             app.manage(db);
             app.manage(llm_handle);
@@ -124,6 +180,14 @@ pub fn run() {
             tauri_commands::app_info,
             tauri_commands::approve_action,
         ])
+        .on_window_event(|window, event| {
+            // Closing the floating widget just hides it; the actor + heartbeat
+            // keep running silently in the background (tray "Sair" exits).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running the Kensho application");
 }

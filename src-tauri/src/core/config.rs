@@ -24,6 +24,12 @@ pub struct SystemConfig {
     pub context_size: u32,
     /// Proactive heartbeat interval in seconds. Read from `KENSHO_HEARTBEAT_SECS`.
     pub heartbeat_secs: u64,
+    /// Piper TTS executable (`KENSHO_PIPER_BIN`, default `piper`).
+    pub piper_bin: String,
+    /// Piper voice model path (`KENSHO_PIPER_MODEL`).
+    pub piper_model: String,
+    /// Piper output sample rate (`KENSHO_PIPER_RATE`, default 22050).
+    pub piper_sample_rate: u32,
 }
 
 impl SystemConfig {
@@ -47,6 +53,14 @@ impl SystemConfig {
             .filter(|&v| v >= 10)
             .unwrap_or(300);
 
+        let piper_bin = std::env::var("KENSHO_PIPER_BIN").unwrap_or_else(|_| "piper".to_string());
+        let piper_model = std::env::var("KENSHO_PIPER_MODEL").unwrap_or_default();
+        let piper_sample_rate = std::env::var("KENSHO_PIPER_RATE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v >= 8000)
+            .unwrap_or(22050);
+
         Self {
             data_dir,
             database_path,
@@ -55,6 +69,9 @@ impl SystemConfig {
             max_tokens: 512,
             context_size,
             heartbeat_secs,
+            piper_bin,
+            piper_model,
+            piper_sample_rate,
         }
     }
 }

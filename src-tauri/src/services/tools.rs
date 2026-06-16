@@ -103,6 +103,11 @@ pub trait Tool: Send + Sync {
     /// Upper-case command name matched against `<CALL:NAME>`.
     fn name(&self) -> &str;
 
+    /// Human/agent-facing description (surfaced via the MCP `tools/list`).
+    fn description(&self) -> &str {
+        ""
+    }
+
     /// Execute with the raw argument string.
     async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome>;
 }
@@ -157,6 +162,18 @@ impl ToolRouter {
         router
     }
 
+    /// `(name, description)` for every registered tool, sorted by name.
+    /// Consumed by the MCP bridge's `tools/list`.
+    pub fn descriptors(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .tools
+            .values()
+            .map(|t| (t.name().to_string(), t.description().to_string()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Intercept + execute. Unknown commands are logged, not fatal.
     pub async fn dispatch(&self, call: ToolCall) -> AppResult<ToolOutcome> {
         match self.tools.get(&call.name) {
@@ -196,6 +213,10 @@ struct AddTaskTool {
 impl Tool for AddTaskTool {
     fn name(&self) -> &str {
         "ADD_TASK"
+    }
+
+    fn description(&self) -> &str {
+        "Cria e persiste uma tarefa pessoal (título e data opcional)."
     }
 
     async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
@@ -241,6 +262,10 @@ struct DelegateTaskTool {
 impl Tool for DelegateTaskTool {
     fn name(&self) -> &str {
         "DELEGATE"
+    }
+
+    fn description(&self) -> &str {
+        "Delega um ticket a um membro da equipe e notifica via webhook."
     }
 
     async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
@@ -331,6 +356,10 @@ impl Tool for ShellCommandTool {
         "CMD"
     }
 
+    fn description(&self) -> &str {
+        "Executa um comando de shell (mutações exigem aprovação)."
+    }
+
     async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
         let cmd = raw_args.trim().to_string();
         if cmd.is_empty() {
@@ -390,6 +419,10 @@ impl Tool for ReadLocalFileTool {
         "READ_FILE"
     }
 
+    fn description(&self) -> &str {
+        "Lê um arquivo local (limitado) e o injeta para análise."
+    }
+
     async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
         let path = raw_args.trim().to_string();
         if path.is_empty() {
@@ -438,6 +471,10 @@ impl Tool for ScanProjectTool {
         "SCAN_DIR"
     }
 
+    fn description(&self) -> &str {
+        "Varre e resume um diretório inteiro (RAG-lite)."
+    }
+
     async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
         let dir = raw_args.trim().to_string();
         if dir.is_empty() {
@@ -478,6 +515,10 @@ impl Tool for MemorizeTool {
         "MEMORIZE"
     }
 
+    fn description(&self) -> &str {
+        "Salva uma anotação na memória permanente (FTS5)."
+    }
+
     async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
         // `Título|Conteúdo|tags-opcionais`
         let mut parts = raw_args.splitn(3, '|');
@@ -510,6 +551,10 @@ struct RecallTool {
 impl Tool for RecallTool {
     fn name(&self) -> &str {
         "RECALL"
+    }
+
+    fn description(&self) -> &str {
+        "Busca na memória permanente por palavras-chave."
     }
 
     async fn execute(&self, raw_args: &str) -> AppResult<ToolOutcome> {
