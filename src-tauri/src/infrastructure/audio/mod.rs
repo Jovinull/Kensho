@@ -36,10 +36,23 @@ impl Speaker {
     }
 }
 
+/// Lipsync event payload emitted just before a sentence is voiced.
+#[cfg(feature = "tts")]
+#[derive(serde::Serialize, Clone)]
+struct SpeakStart {
+    text: String,
+    /// Rough estimate so the UI can self-correct if `end` is missed.
+    duration_ms: u64,
+}
+
 /// Spawn the Piper playback worker and return a connected `Speaker`.
 /// Requires a configured model; otherwise returns a disabled speaker.
+/// `app` is used to emit `audio://start-sentence` / `audio://end-sentence`
+/// for the frontend's fake-lipsync animation.
 #[cfg(feature = "tts")]
-pub fn spawn(config: &crate::core::SystemConfig) -> Speaker {
+pub fn spawn(config: &crate::core::SystemConfig, app: tauri::AppHandle) -> Speaker {
+    use tauri::Emitter;
+
     if config.piper_model.trim().is_empty() {
         tracing::warn!("KENSHO_PIPER_MODEL not set; voice disabled");
         return Speaker::disabled();
@@ -54,7 +67,17 @@ pub fn spawn(config: &crate::core::SystemConfig) -> Speaker {
         tracing::info!(%model, "Piper TTS worker started");
         // Sentences play sequentially, in order, as they arrive.
         while let Ok(sentence) = rx.recv() {
+            // ~12 chars/sec is a rough speaking cadence.
+            let duration_ms = (sentence.chars().count() as u64).max(1) * 1000 / 12;
+            let _ = app.emit(
+                "audio://start-sentence",
+                SpeakStart {
+                    text: sentence.clone(),
+                    duration_ms,
+                },
+            );
             play_sentence(&bin, &model, rate, &sentence);
+            let _ = app.emit("audio://end-sentence", ());
         }
         tracing::info!("Piper TTS worker stopped");
     });

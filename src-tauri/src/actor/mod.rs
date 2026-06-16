@@ -231,11 +231,11 @@ async fn run_generation(
     // Record the user turn.
     history.push_user(user_input);
 
-    // Accumulated visible text across all passes (a tool like READ_FILE can
-    // trigger a follow-up pass after injecting file content into history).
+    // Accumulated visible text across all passes. Tools (READ_FILE success, or a
+    // failed CMD) inject follow-up context that drives another silent inference
+    // cycle — autonomous multi-step "chain of thought" — hard-capped.
     let mut transcript = String::new();
     let mut pass: u8 = 0;
-    const MAX_FOLLOW_UP_PASSES: u8 = 1;
 
     loop {
         emit(app, EVENT_STATE, StatePayload { state: CharacterState::Thinking });
@@ -296,6 +296,13 @@ async fn run_generation(
                                 EVENT_TOOL,
                                 ToolPayload { summary: format!("Falha ao executar comando: {e}") },
                             );
+                            // Feed the failure back so the model can self-correct
+                            // (chain-of-thought) on the next cycle.
+                            follow_ups.push(format!(
+                                "A última ferramenta falhou: {e}. \
+                                 Analise o erro e tente uma abordagem alternativa, \
+                                 ou explique ao usuário se não for possível."
+                            ));
                         }
                     }
                 }
@@ -330,9 +337,9 @@ async fn run_generation(
         history.push_assistant(full_text.clone());
         transcript.push_str(&full_text);
 
-        // A tool asked to inject context (e.g. file content): push it and run
-        // one more pass so the model answers over the new context.
-        if !follow_ups.is_empty() && pass < MAX_FOLLOW_UP_PASSES {
+        // A tool injected context (file content, or an error to recover from):
+        // push it and run another silent cycle — until resolved or capped.
+        if !follow_ups.is_empty() && allow_another_cycle(pass) {
             pass += 1;
             for ctx in follow_ups {
                 history.push_user(ctx);
@@ -347,8 +354,32 @@ async fn run_generation(
     emit(app, EVENT_STATE, StatePayload { state: CharacterState::Idle });
 }
 
+/// Hard ceiling on inference cycles per user turn (initial + tool-driven
+/// follow-ups). Prevents runaway autonomous loops.
+const MAX_TOOL_CYCLES: u8 = 3;
+
+/// Whether another tool-driven cycle is allowed given the current pass index.
+fn allow_another_cycle(pass: u8) -> bool {
+    pass + 1 < MAX_TOOL_CYCLES
+}
+
 fn emit<P: Serialize + Clone>(app: &AppHandle, event: &str, payload: P) {
     if let Err(e) = app.emit(event, payload) {
         tracing::warn!(event, error = %e, "failed to emit tauri event");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allow_another_cycle, MAX_TOOL_CYCLES};
+
+    #[test]
+    fn multi_step_loop_is_hard_capped() {
+        assert_eq!(MAX_TOOL_CYCLES, 3);
+        // Passes 0 and 1 may spawn another cycle; pass 2 is the last → stop.
+        assert!(allow_another_cycle(0));
+        assert!(allow_another_cycle(1));
+        assert!(!allow_another_cycle(2));
+        assert!(!allow_another_cycle(3));
     }
 }

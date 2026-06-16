@@ -31,6 +31,10 @@ interface ApprovalPayload {
   id: string;
   command: string;
 }
+interface StartSentencePayload {
+  text: string;
+  duration_ms: number;
+}
 
 const stage = document.getElementById("stage") as HTMLElement;
 const sprite = document.getElementById("sprite") as HTMLImageElement;
@@ -155,6 +159,22 @@ async function bootstrap(): Promise<void> {
   // surface a discreet, transient toast confirming the background action.
   await listen<ToolPayload>("tool://executed", (e) => {
     showToast(`✓ ${e.payload.summary}`);
+  });
+
+  // Fake lipsync: pulse the sprite while a sentence is actually being voiced.
+  let talkTimer: number | undefined;
+  await listen<StartSentencePayload>("audio://start-sentence", (e) => {
+    sprite.classList.add("talking");
+    if (talkTimer !== undefined) clearTimeout(talkTimer);
+    // Safety auto-clear in case the end event is missed.
+    talkTimer = window.setTimeout(
+      () => sprite.classList.remove("talking"),
+      e.payload.duration_ms + 800,
+    );
+  });
+  await listen("audio://end-sentence", () => {
+    if (talkTimer !== undefined) clearTimeout(talkTimer);
+    sprite.classList.remove("talking");
   });
 }
 

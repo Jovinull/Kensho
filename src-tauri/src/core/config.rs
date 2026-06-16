@@ -30,6 +30,8 @@ pub struct SystemConfig {
     pub piper_model: String,
     /// Piper output sample rate (`KENSHO_PIPER_RATE`, default 22050).
     pub piper_sample_rate: u32,
+    /// MCP TCP server port (`KENSHO_MCP_PORT`, default 8181).
+    pub mcp_port: u16,
 }
 
 impl SystemConfig {
@@ -61,6 +63,11 @@ impl SystemConfig {
             .filter(|&v| v >= 8000)
             .unwrap_or(22050);
 
+        let mcp_port = std::env::var("KENSHO_MCP_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(8181);
+
         Self {
             data_dir,
             database_path,
@@ -72,6 +79,7 @@ impl SystemConfig {
             piper_bin,
             piper_model,
             piper_sample_rate,
+            mcp_port,
         }
     }
 }

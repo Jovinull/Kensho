@@ -155,13 +155,35 @@ A tray icon (AppIndicator) keeps Kensho out of the dock: menu items
 Closing the window only **hides** it (`CloseRequested` → `prevent_close` + `hide`);
 the actor + heartbeat keep running. Only tray "Sair" exits.
 
-## MCP bridge
+## MCP bridge + server
 
 `services/mcp_bridge.rs` exposes the `ToolRouter` over JSON-RPC 2.0
 (`McpRequest` / `McpResponse`): `tools/list` discovers capabilities,
-`tools/call` invokes them — routed into the same router the local LLM uses. No
-server yet (structs + adapter only), so the toolset is ready for external MCP
-clients without coupling.
+`tools/call` invokes them — routed into the same router the local LLM uses.
+
+`infrastructure/mcp_server.rs` serves that bridge over **TCP (JSON-Lines)** on
+`127.0.0.1:KENSHO_MCP_PORT` (default 8181): one JSON-RPC request per line, one
+response per line. Kensho becomes a local daemon any other AI client (Claude
+Desktop, your scripts) can query for OS-level tools. Loopback-only.
+
+```bash
+printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | nc 127.0.0.1 8181
+```
+
+## Autonomous multi-step loop
+
+If a tool fails (bad path, compile error), the actor **doesn't** surface the
+error immediately — it re-injects the failure as context and runs another silent
+inference cycle, hard-capped at `MAX_TOOL_CYCLES = 3`. So Kensho can try
+`READ_FILE log.txt` → "not found" → `CMD ls` → find `error_log.txt` → read it →
+answer. Chain-of-thought self-correction with a strict safety lock.
+
+## Lipsync (with `tts`)
+
+The audio worker emits `audio://start-sentence` (with a rough duration estimate)
+right before voicing each sentence and `audio://end-sentence` after. The frontend
+toggles a faster "talk" pulse on the sprite for the duration, syncing the
+animation to the actual audio instead of a generic loop.
 
 ## Build flavors
 

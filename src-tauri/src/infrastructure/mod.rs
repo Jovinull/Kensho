@@ -4,6 +4,7 @@
 pub mod audio;
 pub mod database;
 pub mod llm;
+pub mod mcp_server;
 pub mod os_signals;
 
 pub use audio::Speaker;

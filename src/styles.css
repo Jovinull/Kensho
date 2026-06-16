@@ -147,6 +147,13 @@ body {
   animation: bounce 0.5s ease-in-out infinite;
   filter: drop-shadow(0 0 12px var(--speaking));
 }
+/* Fake lipsync: faster talk pulse while audio is actually playing. Overrides
+   the generic speaking bounce until the sentence finishes voicing. */
+#stage[data-state="speaking"] .sprite.talking,
+.sprite.talking {
+  animation: talk 0.26s ease-in-out infinite;
+  filter: drop-shadow(0 0 16px var(--speaking));
+}
 #stage[data-state="alert"] .sprite {
   animation: shake 0.4s ease-in-out infinite;
   filter: drop-shadow(0 0 12px #ff4d4f);
@@ -163,6 +170,10 @@ body {
 @keyframes bounce {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-7px); }
+}
+@keyframes talk {
+  0%, 100% { transform: scale(1) translateY(0); }
+  50% { transform: scale(1.07) translateY(-2px); }
 }
 @keyframes shake {
   0%, 100% { transform: translateX(0); }

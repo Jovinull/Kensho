@@ -58,6 +58,20 @@ pub fn run() {
             let gate = Arc::new(TauriApprovalGate::new(handle.clone(), pending.clone()));
             let router = ToolRouter::with_defaults(db.clone(), notifier.clone(), gate);
 
+            // Expose the same router over a local MCP (JSON-Lines/TCP) server so
+            // other AI clients on the machine can discover + call Kensho's tools.
+            let mcp_router = router.clone();
+            let mcp_port = config.mcp_port;
+            tauri::async_runtime::spawn(async move {
+                match infrastructure::mcp_server::bind(mcp_port).await {
+                    Ok(listener) => {
+                        tracing::info!(port = mcp_port, "MCP server listening on 127.0.0.1");
+                        infrastructure::mcp_server::serve(listener, mcp_router).await;
+                    }
+                    Err(e) => tracing::warn!(error = %e, port = mcp_port, "MCP server bind failed"),
+                }
+            });
+
             // Clipboard context: snapshotted on hotkey, consumed by next prompt.
             let clipboard = ClipboardContext::new();
 
@@ -66,7 +80,7 @@ pub fn run() {
 
             // Voice output (no-op unless built with --features tts).
             #[cfg(feature = "tts")]
-            let speaker = infrastructure::audio::spawn(&config);
+            let speaker = infrastructure::audio::spawn(&config, handle.clone());
             #[cfg(not(feature = "tts"))]
             let speaker = infrastructure::Speaker::disabled();
 
