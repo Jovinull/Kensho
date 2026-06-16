@@ -68,8 +68,17 @@ pipeline runs with no model and no C++ build. To use a real Qwen `.gguf`:
 
 ```bash
 export KENSHO_MODEL_PATH=/path/to/qwen.gguf
+export KENSHO_CTX=2048               # optional: context window (default 2048)
 cd src-tauri
-cargo build --features llama        # compiles llama.cpp (needs cmake + C++)
+cargo build --features llama         # compiles llama.cpp (needs cmake + C++)
+```
+
+Build prerequisites for the `llama` feature (bindgen needs clang headers):
+```bash
+sudo apt install clang libclang-dev   # provides clang resource headers (stdbool.h…)
+# If only libclang runtime is present, point bindgen at gcc's headers instead:
+export LIBCLANG_PATH=/usr/lib/llvm-18/lib
+export BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/usr/include"
 ```
 
 The system depends only on the `InferenceEngine` trait, so swapping the mock for
