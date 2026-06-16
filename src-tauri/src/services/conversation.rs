@@ -6,28 +6,8 @@
 
 use std::collections::VecDeque;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-}
-
-impl Role {
-    fn tag(self) -> &'static str {
-        match self {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: Role,
-    pub content: String,
-}
+// Conversation primitives now live in the domain layer (shared with the engine).
+pub use crate::domain::chat::{ChatMessage, Role};
 
 /// Bounded rolling window of recent user/assistant messages.
 #[derive(Debug)]

@@ -130,9 +130,19 @@ impl ToolRouter {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
-    /// Build the default router with all built-in capabilities. `gate` mediates
-    /// approval of dangerous shell commands.
+    /// Build the default router with the built-in (hardcoded) team.
     pub fn with_defaults(db: Database, notifier: Notifier, gate: Arc<dyn ApprovalGate>) -> Self {
+        let team = TEAM.iter().map(|s| s.to_string()).collect();
+        Self::with_config(db, notifier, gate, team)
+    }
+
+    /// Build the router with an externally-configured delegation `team`.
+    pub fn with_config(
+        db: Database,
+        notifier: Notifier,
+        gate: Arc<dyn ApprovalGate>,
+        team: Vec<String>,
+    ) -> Self {
         let mut router = Self::new();
 
         // Shared HTTP client for outbound webhooks (5s timeout, rustls).
@@ -153,6 +163,7 @@ impl ToolRouter {
             notifier,
             http,
             webhook_url,
+            team,
         }));
         router.register(Arc::new(MemorizeTool { db: db.clone() }));
         router.register(Arc::new(RecallTool { db }));
@@ -256,6 +267,8 @@ struct DelegateTaskTool {
     http: reqwest::Client,
     /// `KENSHO_TEAM_WEBHOOK_URL` (Slack/Discord-style endpoint), if set.
     webhook_url: Option<String>,
+    /// Valid delegation targets (from config).
+    team: Vec<String>,
 }
 
 #[async_trait]
@@ -279,13 +292,13 @@ impl Tool for DelegateTaskTool {
             ));
         }
 
-        // Validate against the team, normalizing to the canonical name.
-        let assignee = match TEAM.iter().find(|m| m.eq_ignore_ascii_case(assignee_raw)) {
-            Some(m) => (*m).to_string(),
+        // Validate against the configured team, normalizing to the canonical name.
+        let assignee = match self.team.iter().find(|m| m.eq_ignore_ascii_case(assignee_raw)) {
+            Some(m) => m.clone(),
             None => {
                 return Ok(ToolOutcome::summary(format!(
                     "Alvo desconhecido: {assignee_raw}. Equipe: {}.",
-                    TEAM.join(", ")
+                    self.team.join(", ")
                 )));
             }
         };
@@ -912,6 +925,7 @@ mod tests {
             notifier: Notifier::default(),
             http: reqwest::Client::new(),
             webhook_url: Some("http://127.0.0.1:9/webhook".to_string()),
+            team: TEAM.iter().map(|s| s.to_string()).collect(),
         };
         let out = tool.execute("Rafaela|Corrigir bug").await.expect("execute");
         assert!(out.summary.contains("Rafaela"));

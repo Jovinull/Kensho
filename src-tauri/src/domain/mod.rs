@@ -1,5 +1,6 @@
 //! Domain layer: pure entities and value objects with no infrastructure deps.
 
+pub mod chat;
 pub mod delegation;
 pub mod event;
 pub mod ids;
@@ -9,6 +10,8 @@ pub mod task;
 pub mod user;
 
 // Public domain API surface; some re-exports are consumed only as features land.
+#[allow(unused_imports)]
+pub use chat::{ChatMessage, Role};
 #[allow(unused_imports)]
 pub use delegation::DelegatedTask;
 #[allow(unused_imports)]

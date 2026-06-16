@@ -185,6 +185,37 @@ right before voicing each sentence and `audio://end-sentence` after. The fronten
 toggles a faster "talk" pulse on the sprite for the duration, syncing the
 animation to the actual audio instead of a generic loop.
 
+## Configuration
+
+Runtime settings are externalized — no recompile to reconfigure. On first boot
+Kensho writes `~/.config/kensho/config.toml` (via `directories`) with defaults,
+then loads **defaults ← config.toml ← `KENSHO_*` env** (Figment, later wins):
+
+```toml
+model_path = ""              # empty → <data_dir>/models/qwen.gguf
+context_size = 2048
+max_tokens = 512
+heartbeat_secs = 300
+piper_bin = "piper"
+piper_model = ""
+piper_sample_rate = 22050
+mcp_port = 8181
+team_members = ["Waldston", "Joãozinho", "Rafaela"]
+global_shortcut = "Ctrl+Shift+K"
+```
+
+`team_members`, `mcp_port`, Piper paths, the model path and the global hotkey are
+all here — no longer hardcoded. Env overrides map by field name
+(`KENSHO_MCP_PORT`, `KENSHO_MODEL_PATH`, …).
+
+## Model agnosticism
+
+The engine no longer hand-builds ChatML. `LlamaEngine` formats the conversation
+with the GGUF's **own** `apply_chat_template` (via `chat_template()`), falling
+back to generic ChatML only when a model ships none. The actor passes structured
+`ChatMessage`s (domain type) to the engine — swap the `.gguf`, get its native
+prompt format automatically.
+
 ## Build flavors
 
 ```bash

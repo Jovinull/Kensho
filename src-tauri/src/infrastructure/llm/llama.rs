@@ -20,11 +20,12 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
 use super::engine::{InferenceEngine, LlmError, TokenSink};
 use crate::core::SystemConfig;
+use crate::domain::ChatMessage;
 
 /// GBNF for the tool-call body that follows the `<CALL:` trigger. Forces a
 /// structurally valid `NAME>args</CALL>` once the model decides to open a call.
@@ -83,11 +84,18 @@ impl InferenceEngine for LlamaEngine {
         &self.model_id
     }
 
-    async fn generate(&mut self, prompt: &str, sink: TokenSink) -> Result<(), LlmError> {
+    async fn generate(
+        &mut self,
+        messages: &[ChatMessage],
+        sink: TokenSink,
+    ) -> Result<(), LlmError> {
+        // Format via the model's native chat template (model-agnostic), with a
+        // ChatML fallback for GGUFs that don't ship one. Cheap → on async side.
+        let prompt = self.format_prompt(messages)?;
+
         // Clone cheap handles into the blocking thread; the model stays shared.
         let model = Arc::clone(&self.model);
         let backend = Arc::clone(&self.backend);
-        let prompt = prompt.to_owned();
         let n_ctx = self.n_ctx;
         let max_tokens = self.max_tokens;
 
@@ -102,6 +110,43 @@ impl InferenceEngine for LlamaEngine {
             Err(e) => Err(LlmError::Inference(format!("inference task panicked: {e}"))),
         }
     }
+}
+
+impl LlamaEngine {
+    /// Format messages with the GGUF's baked-in chat template; if the model
+    /// ships none, fall back to a generic ChatML layout.
+    fn format_prompt(&self, messages: &[ChatMessage]) -> Result<String, LlmError> {
+        let llama_msgs: Vec<LlamaChatMessage> = messages
+            .iter()
+            .map(|m| LlamaChatMessage::new(m.role.tag().to_string(), m.content.clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| LlmError::Inference(format!("invalid chat message: {e}")))?;
+
+        match self.model.chat_template(None) {
+            Ok(template) => self
+                .model
+                .apply_chat_template(&template, &llama_msgs, true)
+                .map_err(|e| LlmError::Inference(format!("apply_chat_template failed: {e}"))),
+            Err(_) => {
+                tracing::debug!("model has no chat template; using ChatML fallback");
+                Ok(chatml_fallback(messages))
+            }
+        }
+    }
+}
+
+/// Generic ChatML rendering used when the GGUF has no embedded template.
+fn chatml_fallback(messages: &[ChatMessage]) -> String {
+    let mut out = String::new();
+    for m in messages {
+        out.push_str("<|im_start|>");
+        out.push_str(m.role.tag());
+        out.push('\n');
+        out.push_str(&m.content);
+        out.push_str("<|im_end|>\n");
+    }
+    out.push_str("<|im_start|>assistant\n");
+    out
 }
 
 /// The synchronous llama.cpp decode loop. Streams each decoded piece into
@@ -245,6 +290,7 @@ fn decode_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Role;
     use tokio::sync::mpsc;
 
     /// Real end-to-end inference against a local GGUF.
@@ -263,14 +309,14 @@ mod tests {
         let mut engine = LlamaEngine::load(&config).expect("load model");
         let (tx, mut rx) = mpsc::channel::<String>(256);
 
-        // Proper ChatML prompt — exercises the fixed path + `<|im_end|>` stop.
-        let prompt = "<|im_start|>system\nVocê é Kensho, responda em pt-BR de forma breve.\
-                      <|im_end|>\n<|im_start|>user\nDiga olá em uma frase curta.\
-                      <|im_end|>\n<|im_start|>assistant\n"
-            .to_string();
+        // Structured messages — engine applies the model's native template.
+        let messages = vec![
+            ChatMessage::new(Role::System, "Você é Kensho, responda em pt-BR de forma breve."),
+            ChatMessage::new(Role::User, "Diga olá em uma frase curta."),
+        ];
 
         let gen = tokio::spawn(async move {
-            engine.generate(&prompt, tx).await.expect("generate");
+            engine.generate(&messages, tx).await.expect("generate");
         });
 
         let mut out = String::new();

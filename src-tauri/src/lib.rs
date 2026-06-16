@@ -56,7 +56,8 @@ pub fn run() {
             // Human-in-the-loop approval for dangerous shell commands.
             let pending = PendingApprovals::new();
             let gate = Arc::new(TauriApprovalGate::new(handle.clone(), pending.clone()));
-            let router = ToolRouter::with_defaults(db.clone(), notifier.clone(), gate);
+            let router =
+                ToolRouter::with_config(db.clone(), notifier.clone(), gate, config.team_members.clone());
 
             // Expose the same router over a local MCP (JSON-Lines/TCP) server so
             // other AI clients on the machine can discover + call Kensho's tools.
@@ -112,7 +113,13 @@ pub fn run() {
                 use tauri_plugin_global_shortcut::{
                     Builder as ShortcutBuilder, Code, Modifiers, Shortcut, ShortcutState,
                 };
-                let toggle = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyK);
+                // Parse the configured hotkey; fall back to Ctrl+Shift+K.
+                let toggle = config
+                    .global_shortcut
+                    .parse::<Shortcut>()
+                    .unwrap_or_else(|_| {
+                        Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyK)
+                    });
                 let clipboard_hotkey = clipboard.clone();
                 app.handle().plugin(
                     ShortcutBuilder::new()

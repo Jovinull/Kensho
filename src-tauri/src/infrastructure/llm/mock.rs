@@ -9,6 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::engine::{InferenceEngine, LlmError, TokenSink};
+use crate::domain::{ChatMessage, Role};
 
 pub struct MockEngine {
     id: String,
@@ -36,12 +37,23 @@ impl InferenceEngine for MockEngine {
         &self.id
     }
 
-    async fn generate(&mut self, prompt: &str, sink: TokenSink) -> Result<(), LlmError> {
+    async fn generate(
+        &mut self,
+        messages: &[ChatMessage],
+        sink: TokenSink,
+    ) -> Result<(), LlmError> {
+        // Echo the latest user turn so the pipeline is observable.
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
         let reply = format!(
             "Entendi seu pedido: \"{}\". Este é o motor simulado do Kensho — \
              compile com --features llama e aponte KENSHO_MODEL_PATH para um \
              arquivo .gguf do Qwen para respostas reais.",
-            prompt.trim()
+            last_user.trim()
         );
 
         // `split_inclusive` keeps the trailing space so the bubble reads naturally.

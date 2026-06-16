@@ -44,6 +44,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # --- System clipboard access (Ctrl+C context awareness) ---
 arboard = "3"
 
+# --- Externalized runtime config (file + env, native OS paths) ---
+figment = { version = "0.10", features = ["toml", "env"] }
+directories = "5"
+toml = "0.8"
+
 # --- Structured logging ---
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -7,6 +7,8 @@
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::domain::ChatMessage;
+
 /// Errors a backend can raise during loading or inference.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
@@ -27,7 +29,13 @@ pub trait InferenceEngine: Send {
     /// Identifier of the loaded model (path or canonical name).
     fn model_id(&self) -> &str;
 
-    /// Generate a completion for `prompt`, pushing each token into `sink`
-    /// as it is produced. Returns when generation is complete.
-    async fn generate(&mut self, prompt: &str, sink: TokenSink) -> Result<(), LlmError>;
+    /// Generate a completion for the given conversation `messages` (system +
+    /// rolling history), pushing each token into `sink` as it is produced. The
+    /// engine is responsible for formatting (native chat template or fallback),
+    /// keeping the system model-agnostic.
+    async fn generate(
+        &mut self,
+        messages: &[ChatMessage],
+        sink: TokenSink,
+    ) -> Result<(), LlmError>;
 }

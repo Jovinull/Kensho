@@ -76,11 +76,14 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     fn test_router() -> ToolRouter {
-        ToolRouter::with_defaults(
-            Database::open_in_memory().expect("db"),
-            Notifier::default(),
-            Arc::new(AlwaysApprove),
-        )
+        test_router_with_db().0
+    }
+
+    fn test_router_with_db() -> (ToolRouter, Database) {
+        let db = Database::open_in_memory().expect("db");
+        let router =
+            ToolRouter::with_defaults(db.clone(), Notifier::default(), Arc::new(AlwaysApprove));
+        (router, db)
     }
 
     #[tokio::test]
@@ -102,6 +105,26 @@ mod tests {
         assert!(resp.contains("\"result\""));
         assert!(resp.contains("ADD_TASK"));
         assert!(resp.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn tcp_tools_call_executes_and_returns_resolved() {
+        let (router, db) = test_router_with_db();
+        let listener = bind(0).await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(serve(listener, router));
+
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        let req = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\
+                   \"params\":{\"name\":\"add_task\",\"arguments\":{\"args\":\"Comprar pão|2026-06-20\"}}}\n";
+        client.write_all(req.as_bytes()).await.expect("write");
+
+        let mut buf = vec![0u8; 4096];
+        let n = client.read(&mut buf).await.expect("read");
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.contains("Comprar pão"), "resolved summary over the wire");
+        // The tool actually executed against the DB on the other side.
+        assert_eq!(db.count_tasks().expect("count"), 1);
     }
 
     #[tokio::test]
